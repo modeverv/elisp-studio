@@ -1,0 +1,16 @@
+{
+  "name": "elisp-studio",
+  "private": true,
+  "type": "module",
+  "description": "Write a web application in Emacs Lisp in the browser and watch it change without a reload",
+  "scripts": {
+    "serve": "node tools/serve.mjs",
+    "test": "npm run test:unit && npm run test:e2e && npm run test:e2e:plain",
+    "test:unit": "node --test test/*.test.mjs",
+    "test:e2e": "node test/e2e.mjs",
+    "test:e2e:plain": "node test/e2e.mjs --plain"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

@@ -1,0 +1,7 @@
+body { margin: 0; padding: 24px; background: #16181d; color: #e6e6e6; font: 15px/1.6 system-ui, sans-serif; }
+h1 { font-size: 22px; margin: 0 0 8px; color: #c792ea; }
+.counter { display: flex; align-items: center; gap: 10px; padding: 10px 12px; margin: 12px 0;
+           background: #20232a; border-radius: 6px; }
+.count { margin: 0; min-width: 8em; font-variant-numeric: tabular-nums; }
+button { font: inherit; padding: 4px 14px; border: 0; border-radius: 4px; background: #5b3d8f; color: #fff; cursor: pointer; }
+button:disabled { background: #33363d; color: #777; cursor: default; }

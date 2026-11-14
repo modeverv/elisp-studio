@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>elisp-studio</title>
+    <!-- The editor is Emacs with SharedArrayBuffer: this page has to be
+         cross-origin isolated.  On hosts that do not send the headers
+         (GitHub Pages) this service worker adds them. -->
+    <script src="coi-serviceworker.js"></script>
+    <style>
+      html, body { height: 100%; margin: 0; }
+      body { display: flex; flex-direction: column; background: #111318; color: #d7d9de;
+             font: 13px/1.4 system-ui, sans-serif; }
+      header { display: flex; align-items: center; gap: 12px; padding: 6px 12px; background: #1c1f26;
+               border-bottom: 1px solid #2c3038; flex: none; }
+      header h1 { margin: 0; font-size: 14px; color: #c792ea; white-space: nowrap; }
+      header code { color: #8a8f98; }
+      #status { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #8a8f98; }
+      #status.ok { color: #7fd88b; }
+      #status.error { color: #ef9a9a; }
+      header button { font: inherit; padding: 3px 12px; border: 0; border-radius: 4px; background: #33363d;
+                      color: #fff; cursor: pointer; }
+      header a { color: #82aaff; white-space: nowrap; }
+      main { flex: 1; display: flex; min-height: 0; }
+      .pane { flex: 1 1 50%; min-width: 0; display: flex; flex-direction: column; }
+      .pane + .pane { border-left: 1px solid #2c3038; }
+      .pane h2 { margin: 0; padding: 3px 12px; font-size: 11px; font-weight: normal; color: #8a8f98;
+                 background: #181b21; flex: none; }
+      iframe { flex: 1; width: 100%; border: 0; background: #16181d; }
+      #error { display: none; margin: 0; padding: 8px 12px; max-height: 30%; overflow: auto; flex: none;
+               background: #4a1212; color: #fff; font: 12px/1.4 monospace; white-space: pre-wrap; }
+      #error.shown { display: block; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>elisp-studio</h1>
+      <code id="project"></code>
+      <span id="status">starting…</span>
+      <button id="restart" type="button" title="Start the application again; its state is reset">restart app</button>
+      <a href="https://github.com/modeverv/elisp-studio">about</a>
+    </header>
+    <main>
+      <section class="pane">
+        <h2>Emacs: edit and save (C-x C-s)</h2>
+        <iframe id="editor" title="Emacs"></iframe>
+      </section>
+      <section class="pane">
+        <h2>Your application</h2>
+        <div id="preview-slot" style="flex:1;display:flex;min-height:0"></div>
+        <pre id="error"></pre>
+      </section>
+    </main>
+    <script type="module" src="js/studio.js"></script>
+  </body>
+</html>
