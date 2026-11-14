@@ -16,7 +16,10 @@ const here = new URL("../", import.meta.url);                 // .../elisp-studi
 const WASMACS = new URL("../wasmacs/", here);
 const ELISP_REACT = new URL("../elisp-react/", here);
 const PROJECT = "/home/user/elisp-studio/app";
-const TEMPLATE_FILES = ["index.html", "app.el", "style.css"];
+const TEMPLATE_FILES = ["index.html", "app.el", "style.css", "server.el"];
+const SERVER_FILE = "server.el";
+const SERVER_DATA_KEY = "elisp-studio:server-data";
+const SERVER_TIMEOUT_MS = 8000;
 const LOAD_TIMEOUT_MS = 8000;
 // Starting the application: the first time Emacs may have to be downloaded
 // (150 MB); after that it comes from the browser's cache.
@@ -60,28 +63,35 @@ async function ensureEditorServiceWorker() {
   });
 }
 
-// Emacs creates the project from the template the first time, and visits
-// app.el.  The forms travel as --eval arguments in the editor's URL.
-async function editorUrl() {
-  const template = await Promise.all(TEMPLATE_FILES.map(async (name) => {
-    const response = await fetch(new URL(`template/${name}`, here), { cache: "no-store" });
-    if (!response.ok) throw new Error(`template/${name}: HTTP ${response.status}`);
-    return [name, await response.text()];
-  }));
+// What Emacs evaluates when it starts (--eval forms): it creates the
+// project from the template the first time, visits app.el and loads the
+// editor's side of the studio, lisp/elisp-studio.el.  The editor's page
+// asks for the forms ("wasmacs:options-request"): whole files do not fit
+// into a URL.
+async function editorForms() {
+  const text = async (path) => {
+    const response = await fetch(new URL(path, here), { cache: "no-store" });
+    if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
+    return response.text();
+  };
+  const template = await Promise.all(TEMPLATE_FILES.map(async (name) => [name, await text(`template/${name}`)]));
+  return [
+    `(progn
+      (setq make-backup-files nil auto-save-default nil)
+      (unless (file-exists-p ${lispString(`${PROJECT}/app.el`)})
+        (make-directory ${lispString(PROJECT)} t)
+        ${template.map(([name, content]) => `(write-region ${lispString(content)} nil ${lispString(`${PROJECT}/${name}`)} nil 'silent)`).join("\n        ")}))`,
+    `(find-file ${lispString(`${PROJECT}/app.el`)})`,
+    `(progn
+      (write-region ${lispString(await text("lisp/elisp-studio.el"))} nil "/tmp/elisp-studio.el" nil 'silent)
+      (load "/tmp/elisp-studio.el" nil t))`,
+  ];
+}
+
+function editorUrl() {
   const url = new URL("app/xterm-atomics-pdump.html", WASMACS);
   url.searchParams.set("embed", "1");
-  url.searchParams.append("extra-eval", `(progn
-    (setq make-backup-files nil auto-save-default nil)
-    (unless (file-exists-p ${lispString(`${PROJECT}/app.el`)})
-      (make-directory ${lispString(PROJECT)} t)
-      ${template.map(([name, text]) => `(write-region ${lispString(text)} nil ${lispString(`${PROJECT}/${name}`)} nil 'silent)`).join("\n      ")}))`);
-  url.searchParams.append("extra-eval", `(find-file ${lispString(`${PROJECT}/app.el`)})`);
-  // The editor's side of the studio: lisp/elisp-studio.el.
-  const editorLisp = await fetch(new URL("lisp/elisp-studio.el", here), { cache: "no-store" });
-  if (!editorLisp.ok) throw new Error(`lisp/elisp-studio.el: HTTP ${editorLisp.status}`);
-  url.searchParams.append("extra-eval", `(progn
-    (write-region ${lispString(await editorLisp.text())} nil "/tmp/elisp-studio.el" nil 'silent)
-    (load "/tmp/elisp-studio.el" nil t))`);
+  url.searchParams.set("options", "parent");
   return url.href;
 }
 
@@ -109,6 +119,97 @@ function editorLog(log, loaded, path) {
 function report(status, summary, log = "") {
   setStatus(summary, status);
   tellEditor({ type: "log", status, summary: `elisp-studio: ${summary}`, log });
+}
+
+// ---- the server -----------------------------------------------------------------
+// A project with a server.el has a server: a third Emacs in this tab (the
+// eval service again) that runs it on lisp/app-server.el.  The application's
+// requests to /api/... are answered by it instead of the network.  What it
+// keeps with app-server-write is saved in localStorage.
+
+let server = null;            // { emacs, source } | null
+let serverLibrary = null;
+
+async function startServer(source) {
+  stopServer();
+  const { createEmacsEvalService } = await import(new URL("app/src/emacs-eval-client.js", WASMACS).href);
+  serverLibrary ??= await (await fetch(new URL("lisp/app-server.el", here), { cache: "no-store" })).text();
+  const emacs = createEmacsEvalService({ onOutput: (text) => console.log(`[server] ${text.trimEnd()}`) });
+  await withTimeout(emacs.ready, FIRST_START_TIMEOUT_MS, "the server's Emacs");
+  await emacs.eval(`${serverLibrary}\nnil`);
+  let stored = [];
+  try { stored = JSON.parse(localStorage.getItem(SERVER_DATA_KEY) || "[]"); } catch (_) { /* start empty */ }
+  await emacs.call("app-server--restore", stored);
+  server = { emacs, source: null, saved: JSON.stringify(stored) };
+  await loadServer(source);
+}
+
+function stopServer() {
+  try { server?.emacs.terminate(); } catch (_) { /* gone already */ }
+  server = null;
+}
+
+// Evaluate server.el in the server's Emacs (again, when it changed).
+async function loadServer(source) {
+  await withTimeout(server.emacs.eval(`${source}\nnil`), SERVER_TIMEOUT_MS, "the server");
+  server.source = source;
+}
+
+// Bring the server in line with the project.  Returns a line for the
+// status, or null when nothing changed.
+async function syncServer(project) {
+  const source = project.get(SERVER_FILE);
+  if (source === undefined) {
+    if (!server) return null;
+    stopServer();
+    return "server.el is gone: the server stopped";
+  }
+  if (server && server.source === source) return null;
+  try {
+    if (server) {
+      await loadServer(source);
+      return `server.el updated at ${clock()}: the server keeps its data`;
+    }
+    await startServer(source);
+    return "the server runs";
+  } catch (error) {
+    if (/did not answer/.test(error.message)) stopServer();
+    throw Object.assign(new Error(`server.el: ${error.symbol ? `${error.symbol}: ` : ""}${error.message}`), { server: true });
+  }
+}
+
+// The fetch of the application: /api/... goes to the server's Emacs.
+async function applicationFetch(url, options = {}) {
+  const target = new URL(url, "http://application.invalid/");
+  if (target.origin !== "http://application.invalid" || !target.pathname.startsWith("/api/")) {
+    return fetch(url, options);
+  }
+  const lisp = (status, value) => new Response(value, {
+    status, headers: { "Content-Type": "application/x-emacs-lisp; charset=utf-8" },
+  });
+  if (!server) return lisp(404, '"This application has no server.el"');
+  try {
+    const [status, text] = await withTimeout(
+      server.emacs.call("app-server-respond", options.method || "GET", target.pathname, options.body ?? ""),
+      SERVER_TIMEOUT_MS, "the server");
+    // Keep what the server keeps.
+    const data = JSON.stringify(await server.emacs.call("app-server--dump"));
+    if (data !== server.saved) {
+      try { localStorage.setItem(SERVER_DATA_KEY, data); } catch (_) { /* full */ }
+      server.saved = data;
+    }
+    return lisp(status, text);
+  } catch (error) {
+    if (/did not answer/.test(error.message)) {
+      // Busy for good (an endless loop in a handler): start a new one.
+      const source = server?.source;
+      stopServer();
+      report("error", "the server did not answer and was started again");
+      if (source !== null && source !== undefined) startServer(source).catch(() => {});
+      return lisp(504, '"The server did not answer"');
+    }
+    return lisp(500, JSON.stringify(error.message));
+  }
 }
 
 // ---- the application --------------------------------------------------------------
@@ -204,6 +305,7 @@ async function startPreview(project, why) {
     const app = await withTimeout(frame.contentWindow.__studio.start({
       wasmacs: WASMACS.href,
       sources: built.sources.map(({ name, text }) => ({ name, text })),
+      fetch: applicationFetch,
     }), startedOnce ? START_TIMEOUT_MS : FIRST_START_TIMEOUT_MS, "the application");
     if (mine !== generation) return;
     startedOnce = true;
@@ -238,7 +340,21 @@ async function applyProject(next) {
   }
   const first = files.size === 0;
   files = next;
+  // The server first: the application asks it as soon as it starts.
+  let serverNews = null;
+  try {
+    serverNews = await syncServer(next);
+  } catch (error) {
+    showError(error.message);
+    report("error", "server.el was not applied (the server runs on with the old code)", error.message);
+    if (!first) return;
+  }
   if (first) return startPreview(next, "project loaded");
+  const serverOnly = changed.every((path) => path === SERVER_FILE);
+  if (serverNews && serverOnly) {
+    showError("");
+    return report("ok", serverNews);
+  }
   if (changed.length === 0) return;
   if (!preview?.app || changed.includes("index.html")) {
     return startPreview(next, changed.includes("index.html") ? "index.html changed" : `${changed[0]} changed`);
@@ -276,6 +392,20 @@ async function applyProject(next) {
 
 // C-M-x in Emacs: one definition, evaluated in the running application.
 async function evalInApplication(file, text) {
+  if (file === SERVER_FILE) {
+    if (!server) return report("error", "the server is not running");
+    try {
+      await withTimeout(server.emacs.eval(`${text}\nnil`), SERVER_TIMEOUT_MS, "the server");
+      unsaved.add(file);
+      server.source = null;      // not what the file says any more: a save loads it again
+      showError("");
+      return report("ok", `a definition of ${file} evaluated in the server at ${clock()} (not saved yet)`);
+    } catch (error) {
+      const message = `${error.symbol ? `${error.symbol}: ` : ""}${error.message}`;
+      showError(message);
+      return report("error", `the definition of ${file} was not applied`, message);
+    }
+  }
   if (!preview?.app) return report("error", "the application is not running");
   if (!preview.sources.has(file)) return report("error", `${file} is not part of the running application`);
   try {
@@ -291,6 +421,8 @@ async function evalInApplication(file, text) {
   }
 }
 
+let editorOptions = [];
+
 // One change after the other.
 let queue = Promise.resolve();
 function onUserImage(bytes) {
@@ -304,6 +436,9 @@ function onUserImage(bytes) {
 
 window.addEventListener("message", (event) => {
   if (event.origin !== location.origin || event.source !== editorFrame.contentWindow) return;
+  if (event.data?.type === "wasmacs:options-request") {
+    editorFrame.contentWindow.postMessage({ type: "wasmacs:options", extraEvals: editorOptions }, location.origin);
+  }
   if (event.data?.type === "wasmacs:user-image") onUserImage(new Uint8Array(event.data.bytes));
   if (event.data?.type === "wasmacs:message") onEditorMessage(event.data.text);
 });
@@ -329,6 +464,7 @@ document.querySelector("#restart").addEventListener("click", () => {
 window.elispStudio = {
   get preview() { return preview; },
   get files() { return files; },
+  get server() { return server; },
   editor: editorFrame,
 };
 
@@ -338,7 +474,8 @@ try {
   } else {
     await ensureEditorServiceWorker();
     setStatus("starting Emacs…");
-    editorFrame.src = await editorUrl();
+    editorOptions = await editorForms();
+    editorFrame.src = editorUrl();
   }
 } catch (error) {
   setStatus("the studio did not start", "error");

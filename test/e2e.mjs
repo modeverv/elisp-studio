@@ -146,6 +146,34 @@ try {
   await appUntil("document.querySelector('h1').textContent === 'Fixed'", "back to the saved text");
   pass("C-M-x sends the definition at point to the running application; the file is not saved, the state is kept");
 
+  // The server: a third Emacs in the tab runs the project's server.el.
+  const messages = () => app("[...document.querySelectorAll('.message')].map((node) => node.textContent)");
+  const send = (text) => app(`(() => {
+    const input = document.querySelector('.draft');
+    input.value = ${JSON.stringify(text)};
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector('.messages form').requestSubmit();
+    return true;
+  })()`);
+  assert.deepEqual(await messages(), ["Hello from the server's Emacs"]);
+  await send("first");
+  await appUntil("document.querySelectorAll('.message').length === 2", "the server stores a message");
+  assert.deepEqual(await messages(), ["Hello from the server's Emacs", "first"]);
+  pass("the application's requests to /api/ are answered by server.el in a third Emacs");
+
+  await editFile("server.el", "(list (string-trim text))", "(list (upcase (string-trim text)))");
+  await until("/server\\.el updated/.test(document.querySelector('#status').textContent)", "server.el is applied");
+  await send("second");
+  await appUntil("document.querySelectorAll('.message').length === 3", "the changed server answers");
+  assert.deepEqual(await messages(), ["Hello from the server's Emacs", "first", "SECOND"]);
+  assert.equal(await app("document.querySelector('.count').textContent"), "Clicks so far: 14");
+  pass("a saved server.el takes effect at once; the server keeps its data, the application its state");
+
+  await send("   ");
+  await appUntil("document.querySelector('.messages .error')?.textContent === 'A message needs some text'", "the server refuses");
+  assert.equal((await messages()).length, 3);
+  pass("an error signalled in server.el reaches the page as the response");
+
   // An endless loop in the application: it is replaced, the editor lives.
   await editFile("app.el", '(h1 "Fixed")', '(h1 (progn (while t) "never"))');
   await until("/did not start/.test(document.querySelector('#status').textContent)", "the hang is noticed and the stuck application is taken away", 90_000);
@@ -159,6 +187,13 @@ try {
   await editFile("index.html", '<div id="app">Loading Emacs…</div>', '<header id="banner">My page</header><div id="app">Loading Emacs…</div>');
   await appUntil("document.querySelector('#banner')?.textContent === 'My page' && document.querySelector('h1')?.textContent === 'Back'", "index.html restarts the application");
   pass("a changed index.html starts the application again");
+
+  // Close the tab, come back: the project (Emacs's files) and what the
+  // server kept are still there.
+  await client.send("Page.navigate", { url: `${origin}/elisp-studio/` }, sessionId);
+  await appUntil("document.querySelector('#banner')?.textContent === 'My page' && document.querySelectorAll('.message').length === 3", "everything is still there after a reload");
+  assert.deepEqual(await messages(), ["Hello from the server's Emacs", "first", "SECOND"]);
+  pass("after a reload of the studio, the project and the server's data are as they were");
   console.log("e2e passed");
 } catch (error) {
   // What the studio and Emacs showed when it went wrong.
@@ -166,6 +201,7 @@ try {
     const show = (expression) => evaluate(client, pageSession, expression).catch((failure) => `(${failure.message})`);
     console.error("status:", await show("document.querySelector('#status').textContent"));
     console.error("error :", await show("document.querySelector('#error').textContent"));
+    console.error("app   :", await show("document.querySelector('#preview')?.contentDocument?.body?.innerText"));
     console.error("emacs :\n" + await show("document.querySelector('#editor').contentWindow.__wasmacsDebugScreenText().split('\\n').map((row) => row.trimEnd()).filter(Boolean).join('\\n')"));
   } catch (_) { /* the browser is gone */ }
   throw error;

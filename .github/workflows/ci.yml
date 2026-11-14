@@ -19,6 +19,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
+      - name: Install Emacs (the project server test runs one)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y emacs-nox
       - run: npm run test:unit
       - name: The scripts parse
         run: node --check js/studio.js && node --check js/tar.js && node --check tools/serve.mjs

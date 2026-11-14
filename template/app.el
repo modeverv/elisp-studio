@@ -21,12 +21,55 @@
                       :on-click (lambda (_event) (react-set-state self :count 0)))
                "reset"))))))
 
+;; The server side is server.el.  The page asks it with `react-fetch'; both
+;; sides speak Lisp: a request body is printed data, and so is the answer.
+
+(defun api (method path &optional data)
+  "An awaitable for a request to server.el.  Its value is Lisp data."
+  (lambda (resolve reject)
+    (react-fetch path
+                 :method method
+                 :body (and data (prin1-to-string data))
+                 :then (lambda (response)
+                         (let ((value (car (read-from-string (plist-get response :text)))))
+                           (if (plist-get response :ok)
+                               (funcall resolve value)
+                             (funcall reject value))))
+                 :catch reject)))
+
+(react-define-component 'Messages
+  :initial-state (lambda (_props) (list :messages nil :draft "" :error nil))
+  :did-mount
+  (lambda (self)
+    (react-async
+      (condition-case failure
+          (react-set-state self :messages (react-await (api "GET" "/api/messages")))
+        (react-async-error (react-set-state self :error (cadr failure))))))
+  :render
+  (lambda (self)
+    (jsx (section (:class "messages")
+           (h2 "Messages kept by the server")
+           (form (:on-submit (lambda (_event)
+                               (react-async
+                                 (condition-case failure
+                                     (react-set-state
+                                      self :error nil :draft ""
+                                      :messages (react-await (api "POST" "/api/messages" (react-state self :draft))))
+                                   (react-async-error (react-set-state self :error (cadr failure)))))))
+             (input (:class "draft" :placeholder "Say something" :value (react-state self :draft)
+                     :on-input (lambda (event) (react-set-state self :draft (plist-get event :value)))))
+             (button (:class "send") "send"))
+           (and (react-state self :error) (jsx (p (:class "error") (react-state self :error))))
+           (ul (mapcar (lambda (message) (jsx (li (:class "message") message)))
+                       (react-state self :messages)))))))
+
 (react-define-component 'App
   :render
   (lambda (_self)
     (jsx (main
            (h1 "Hello from Emacs Lisp")
            (p "Edit app.el on the left and save.")
-           (Counter)))))
+           (Counter)
+           (Messages)))))
 
 (react-mount (jsx (App)) "#app")
