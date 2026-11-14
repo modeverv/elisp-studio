@@ -24,7 +24,7 @@ const TEMPLATE = /^[a-z0-9-]+$/.test(example || "") ? `examples/${example}/` : "
 const TEMPLATE_FILES = ["index.html", "app.el", "style.css"];
 const TEMPLATE_OPTIONAL_FILES = ["server.el"];
 const SERVER_FILE = "server.el";
-const SERVER_DATA_KEY = "elisp-studio:server-data";
+const SERVER_DATA_KEY = "server-data";
 const SERVER_TIMEOUT_MS = 8000;
 const LOAD_TIMEOUT_MS = 8000;
 // Starting the application: the first time Emacs may have to be downloaded
@@ -144,10 +144,28 @@ function report(status, summary, log = "") {
 // A project with a server.el has a server: a third Emacs in this tab (the
 // eval service again) that runs it on lisp/app-server.el.  The application's
 // requests to /api/... are answered by it instead of the network.  What it
-// keeps with app-server-write is saved in localStorage.
+// keeps (app-server-write, an SQLite database) is saved in IndexedDB.
 
-let server = null;            // { emacs, source } | null
+let server = null;            // { emacs, source, signature } | null
 let serverLibrary = null;
+
+// The server's data directory, kept in IndexedDB (it may hold an SQLite
+// database): [[file name, base64 of its bytes], ...].
+function studioStore(mode, action) {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("elisp-studio", 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("data");
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const transaction = request.result.transaction("data", mode);
+      const result = action(transaction.objectStore("data"));
+      transaction.oncomplete = () => { request.result.close(); resolve(result.result); };
+      transaction.onerror = () => { request.result.close(); reject(transaction.error); };
+    };
+  });
+}
+const loadServerData = () => studioStore("readonly", (store) => store.get(SERVER_DATA_KEY)).then((data) => data || [], () => []);
+const saveServerData = (data) => studioStore("readwrite", (store) => store.put(data, SERVER_DATA_KEY)).catch(() => {});
 
 async function startServer(source) {
   stopServer();
@@ -156,10 +174,8 @@ async function startServer(source) {
   const emacs = createEmacsEvalService({ onOutput: (text) => console.log(`[server] ${text.trimEnd()}`) });
   await withTimeout(emacs.ready, FIRST_START_TIMEOUT_MS, "the server's Emacs");
   await emacs.eval(`${serverLibrary}\nnil`);
-  let stored = [];
-  try { stored = JSON.parse(localStorage.getItem(SERVER_DATA_KEY) || "[]"); } catch (_) { /* start empty */ }
-  await emacs.call("app-server--restore", stored);
-  server = { emacs, source: null, saved: JSON.stringify(stored) };
+  await emacs.call("app-server--restore", await loadServerData());
+  server = { emacs, source: null, signature: await emacs.call("app-server--signature") };
   await loadServer(source);
 }
 
@@ -208,14 +224,15 @@ async function applicationFetch(url, options = {}) {
   });
   if (!server) return lisp(404, '"This application has no server.el"');
   try {
+    const current = server;
     const [status, text] = await withTimeout(
-      server.emacs.call("app-server-respond", options.method || "GET", target.pathname, options.body ?? ""),
+      current.emacs.call("app-server-respond", options.method || "GET", target.pathname + target.search, options.body ?? ""),
       SERVER_TIMEOUT_MS, "the server");
-    // Keep what the server keeps.
-    const data = JSON.stringify(await server.emacs.call("app-server--dump"));
-    if (data !== server.saved) {
-      try { localStorage.setItem(SERVER_DATA_KEY, data); } catch (_) { /* full */ }
-      server.saved = data;
+    // Keep what the server keeps, when the request changed it.
+    const signature = await current.emacs.call("app-server--signature");
+    if (signature !== current.signature) {
+      current.signature = signature;
+      await saveServerData(await current.emacs.call("app-server--dump"));
     }
     return lisp(status, text);
   } catch (error) {
@@ -475,16 +492,43 @@ function onEditorMessage(text) {
   }
 }
 
-// The project as one file, for wherever it should go.
-document.querySelector("#download").addEventListener("click", () => {
+// The project as one file, ready to run somewhere else: its own files, and
+// what makes a native Emacs its web server (run.sh; see tools/project/).
+const RUNTIME_FILES = [
+  ["run.sh", "tools/project/run.sh", true],
+  ["fetch-emacs.sh", "tools/project/fetch-emacs.sh", true],
+  ["README.txt", "tools/project/README.txt", false],
+  ["server/serve-project.el", "tools/serve-project.el", false],
+  ["server/app-server.el", "lisp/app-server.el", false],
+];
+
+async function projectZip() {
+  const entries = [...files];
+  for (const [path, source, executable] of RUNTIME_FILES) {
+    if (files.has(path)) continue;        // the project's own file wins
+    const response = await fetch(new URL(source, here), { cache: "no-store" });
+    if (!response.ok) throw new Error(`${source}: HTTP ${response.status}`);
+    entries.push([path, { content: await response.text(), executable }]);
+  }
+  return createZip(entries);
+}
+
+document.querySelector("#download").addEventListener("click", async () => {
   if (files.size === 0) return;
-  const url = URL.createObjectURL(new Blob([createZip(files)], { type: "application/zip" }));
+  let zip;
+  try {
+    zip = await projectZip();
+  } catch (error) {
+    setStatus(`the archive could not be made: ${error.message}`, "error");
+    return;
+  }
+  const url = URL.createObjectURL(new Blob([zip], { type: "application/zip" }));
   const link = document.createElement("a");
   link.href = url;
   link.download = "elisp-studio-app.zip";
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  setStatus(`${files.size} files in elisp-studio-app.zip`, "ok");
+  setStatus("elisp-studio-app.zip: the project and run.sh, which makes Emacs its web server", "ok");
 });
 
 document.querySelector("#restart").addEventListener("click", () => {
@@ -496,7 +540,7 @@ window.elispStudio = {
   get preview() { return preview; },
   get files() { return files; },
   get server() { return server; },
-  zip: () => createZip(files),
+  zip: projectZip,
   editor: editorFrame,
 };
 

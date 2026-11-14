@@ -78,8 +78,18 @@ The definition at point goes to the application as text and is evaluated there (
 
 `lisp/app-server.el` defines the contract of a project's `server.el`: `app-server-handle (method path body)` returns Lisp data or signals an error, and `app-server-respond` turns that into a status and a printed body. The same two files run in two hosts:
 
-- In the studio, a third eval service worker. The studio gives the application a `fetch` (elisp-react's `start({ fetch })`) that hands requests for `/api/...` to `app-server-respond` and builds the `Response`; everything else goes to the network. After each request the studio asks for what the server keeps (`app-server--dump`) and saves it in `localStorage`; a new server gets it back (`app-server--restore`). A request that does not return within eight seconds ends that Emacs and starts another.
+- In the studio, a third eval service worker. The studio gives the application a `fetch` (elisp-react's `start({ fetch })`) that hands requests for `/api/...` to `app-server-respond` and builds the `Response`; everything else goes to the network. The server's data directory is in that Emacs's memory. After each request the studio asks for a signature of its files (names, sizes, times); when it changed, it takes the files (`app-server--dump`, base64) and puts them into IndexedDB; a new server gets them back before `server.el` is loaded (`app-server--restore`). A request that does not return within eight seconds ends that Emacs and starts another.
 - `tools/serve-project.el`, a small HTTP server in Emacs Lisp for a native Emacs: files from the project directory, `/api/...` through `app-server-respond`, data in `.data/`.
+
+### SQLite
+
+`app-server-database` opens `NAME.db` in the data directory with Emacs's `sqlite-open` and keeps the connection. That is all there is to it on both hosts: natively the file is on disk; in the tab it is in the in-memory filesystem and is persisted as described above (a 12 KB database is 16 KB of base64 per changing request, so this is for small data). wasmacs links SQLite into the browser's Emacs without the write-ahead log, so a database is one file plus a transient `-journal`, which the dump leaves out.
+
+### A project that runs itself
+
+The download adds to the project's own files what `tools/project/` holds: `run.sh` starts the first native Emacs that works with `server/serve-project.el`, and `fetch-emacs.sh` copies the files the page needs from the wasmacs and elisp-react sites into `vendor/` (the eval service's four scripts, the build id, `temacs.js`, `temacs.wasm`, the pdmp and the parts of `temacs.data`; `react.el` and the host). When `vendor/` is there, `serve-project.el` sends `index.html` with its link to the elisp-react site rewritten to `/vendor/elisp-react/` and a `<meta name="elisp-react:wasmacs" content="/vendor/wasmacs/">`, which is the switch elisp-react's host has for exactly this. The project's own `index.html` stays the one that works on a static host.
+
+`test/e2e-sqlite.mjs` follows the whole path: the example in the studio, the ZIP out of the page, `fetch-emacs.sh` against the local server, that server switched off, `run.sh`, and Chrome on the result, which may load from one origin only.
 
 Requests and responses are printed Lisp on both. Nothing a page sends is evaluated: a body is `read` as data by the project's handler.
 

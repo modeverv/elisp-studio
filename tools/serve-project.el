@@ -8,10 +8,15 @@
 ;;
 ;;   tools/serve-project.sh DIRECTORY [PORT]
 ;;
-;; The page still runs its Emacs Lisp in the visitor's browser (the Emacs
-;; of the wasmacs site); this Emacs is the server side only.  What the
-;; server keeps with `app-server-write' goes to DIRECTORY/.data/, which is
-;; not served.
+;; The page still runs its Emacs Lisp in the visitor's browser; this Emacs
+;; is the server side.  What the server keeps (`app-server-write',
+;; `app-server-database') goes to DIRECTORY/.data/, which is not served.
+;;
+;; The Emacs for the browser normally comes from the wasmacs site.  When
+;; DIRECTORY/vendor/ holds a copy (fetch-emacs.sh in a downloaded project
+;; puts one there), this server serves that instead: index.html is sent with
+;; its links to the elisp-react and wasmacs sites turned into links to
+;; /vendor/, and nothing is fetched from the internet.
 ;;
 ;; It listens on 127.0.0.1.  A request body is data for server.el; this
 ;; file evaluates nothing it receives.  Requests to /api/ that a page of
@@ -24,12 +29,19 @@
 (defvar serve-project-port 8018)
 (defvar serve-project--process nil)
 
-(load (expand-file-name "../lisp/app-server.el" (file-name-directory (or load-file-name buffer-file-name))) nil t)
+;; app-server.el: next to this file (a downloaded project), or in lisp/ of
+;; the elisp-studio repository.
+(let ((here (file-name-directory (or load-file-name buffer-file-name))))
+  (load (if (file-readable-p (expand-file-name "app-server.el" here))
+            (expand-file-name "app-server.el" here)
+          (expand-file-name "../lisp/app-server.el" here))
+        nil t))
 
 (defconst serve-project--types
   '(("html" . "text/html; charset=utf-8") ("css" . "text/css; charset=utf-8")
     ("js" . "text/javascript") ("json" . "application/json")
-    ("el" . "text/plain; charset=utf-8") ("png" . "image/png") ("svg" . "image/svg+xml")))
+    ("el" . "text/plain; charset=utf-8") ("png" . "image/png") ("svg" . "image/svg+xml")
+    ("wasm" . "application/wasm") ("mjs" . "text/javascript")))
 
 (defun serve-project--file (path)
   "The file of the project that the URL PATH names, or nil."
@@ -39,7 +51,7 @@
     (and (string-prefix-p (file-truename root) (file-truename file))
          (not (string-match-p "\\(?:\\`\\|/\\)\\." (file-relative-name file root)))
          ;; The server's own program is not for download.
-         (not (equal (file-relative-name file root) "server.el"))
+         (not (string-match-p "\\`server\\(?:\\.el\\|/\\)" (file-relative-name file root)))
          (file-regular-p file)
          file)))
 
@@ -50,6 +62,20 @@
                    status type (string-bytes body))
            body))
   (delete-process process))
+
+(defun serve-project--vendored-p ()
+  "Non-nil if the project has its own copy of the browser's Emacs."
+  (file-readable-p (expand-file-name "vendor/elisp-react/js/elisp-react.js" serve-project-directory)))
+
+(defun serve-project--page (html)
+  "The page HTML, using the copies in /vendor/ instead of the public sites."
+  (let ((case-fold-search t))
+    (setq html (replace-regexp-in-string "https://modeverv\\.github\\.io/elisp-react/" "/vendor/elisp-react/" html t t))
+    (if (string-match "<head[^>]*>" html)
+        (replace-match (concat (match-string 0 html)
+                               "\n    <meta name=\"elisp-react:wasmacs\" content=\"/vendor/wasmacs/\">")
+                       t t html)
+      html)))
 
 (defconst serve-project--reasons '((200 . "OK") (400 . "Bad Request") (404 . "Not Found")))
 
@@ -63,7 +89,7 @@
                                                 (format "http://localhost:%d" serve-project-port)))))
           (serve-project--respond process "403 Forbidden" "application/x-emacs-lisp; charset=utf-8"
                                   "\"requests from other sites are refused\"")
-        (let ((answer (app-server-respond method path (decode-coding-string body 'utf-8))))
+        (let ((answer (app-server-respond method target (decode-coding-string body 'utf-8))))
           (serve-project--respond
            process (format "%d %s" (aref answer 0) (cdr (assq (aref answer 0) serve-project--reasons)))
            "application/x-emacs-lisp; charset=utf-8"
@@ -77,10 +103,13 @@
           (serve-project--respond
            process "200 OK"
            (or (cdr (assoc (file-name-extension file) serve-project--types)) "application/octet-stream")
-           (with-temp-buffer
-             (set-buffer-multibyte nil)
-             (insert-file-contents-literally file)
-             (buffer-string)))))))))
+           (let ((bytes (with-temp-buffer
+                          (set-buffer-multibyte nil)
+                          (insert-file-contents-literally file)
+                          (buffer-string))))
+             (if (and (equal (file-name-extension file) "html") (serve-project--vendored-p))
+                 (encode-coding-string (serve-project--page (decode-coding-string bytes 'utf-8)) 'utf-8)
+               bytes)))))))))
 
 (defun serve-project--filter (process chunk)
   "Collect a request on PROCESS; answer it when it is complete."

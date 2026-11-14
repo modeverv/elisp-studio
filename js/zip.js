@@ -18,8 +18,10 @@ export function crc32(bytes) {
 }
 
 /**
- * A ZIP archive of FILES, a Map (or array of pairs) from path to string or
- * Uint8Array.  DATE stamps every entry.  Returns a Uint8Array.
+ * A ZIP archive of FILES, a Map (or array of pairs) from path to its
+ * content: a string, a Uint8Array, or { content, executable: true } for a
+ * file that is to be unpacked as a program.  DATE stamps every entry.
+ * Returns a Uint8Array.
  */
 export function createZip(files, date = new Date()) {
   const encoder = new TextEncoder();
@@ -28,7 +30,10 @@ export function createZip(files, date = new Date()) {
   const chunks = [];
   const central = [];
   let offset = 0;
-  for (const [path, content] of files) {
+  for (const [path, entryContent] of files) {
+    const described = entryContent !== null && typeof entryContent === "object" && !(entryContent instanceof Uint8Array);
+    const content = described ? entryContent.content : entryContent;
+    const mode = described && entryContent.executable ? 0o755 : 0o644;
     const name = encoder.encode(path);
     const data = typeof content === "string" ? encoder.encode(content) : content;
     const crc = crc32(data);
@@ -51,9 +56,9 @@ export function createZip(files, date = new Date()) {
     const entry = new Uint8Array(46 + name.length);
     const view = new DataView(entry.buffer);
     view.setUint32(0, 0x02014b50, true);
-    view.setUint16(4, 20, true);              // version made by
+    view.setUint16(4, (3 << 8) | 20, true);   // made by: Unix, so that the mode below counts
     entry.set(new Uint8Array(common.buffer), 6);
-    view.setUint32(38, 0o644 << 16, true);    // a regular file, rw-r--r--
+    view.setUint32(38, ((0o100000 | mode) << 16) >>> 0, true);   // a regular file with its permissions
     view.setUint32(42, offset, true);         // where its local header is
     entry.set(name, 46);
     chunks.push(local, data);

@@ -259,13 +259,14 @@ try {
   pass("an error signalled in server.el reaches the page as the response");
 
   // Publishing: the project as a ZIP, and with git from inside Emacs.
-  const zipNames = await js(`(() => {
-    const zip = window.elispStudio.zip();
+  const zipNames = await js(`(async () => {
+    const zip = await window.elispStudio.zip();
     const text = new TextDecoder("latin1").decode(zip);
-    return { magic: text.slice(0, 2), names: ["index.html", "app.el", "style.css", "server.el"].filter((name) => text.includes(name)), git: text.includes(".git/") };
+    const names = ["index.html", "app.el", "style.css", "server.el", "run.sh", "fetch-emacs.sh", "server/serve-project.el", "server/app-server.el", "README.txt"];
+    return { magic: text.slice(0, 2), missing: names.filter((name) => !text.includes(name)), git: text.includes(".git/") };
   })()`);
-  assert.deepEqual(zipNames, { magic: "PK", names: ["index.html", "app.el", "style.css", "server.el"], git: false });
-  pass("the project downloads as a ZIP archive");
+  assert.deepEqual(zipNames, { magic: "PK", missing: [], git: false });
+  pass("the project downloads as a ZIP archive, with run.sh and the server files");
 
   // C-c C-p commits; with a remote it pushes.  The remote here is a bare
   // repository in Emacs's own filesystem.

@@ -29,7 +29,7 @@ Emacs Lisp の Web アプリケーションをブラウザの中で書き、リ�
 3. Emacs で `app.el` の文字列（たとえば `"Count: %d"`）を書き換え、`C-x C-s` で保存します。
 4. アプリケーションの表示が新しい文字列に変わります。カウンターの数はそのままです。
 
-プロジェクトは Emacs のファイルシステムの `/home/user/elisp-studio/app` にあります。ブラウザが保持するので、次に開いたときも残っています。新しいプロジェクトは `template/` から作られます。アドレスに `?example=stopwatch` を付けると `examples/stopwatch/` から作られます。すでにあるプロジェクトが置き換えられることはありません（最初からやり直すには、Emacs の中でこのディレクトリを削除します）。これは wasmacs のページが使っているのと同じ `/home/user` なので、wasmacs を直接開いたときにもプロジェクトが見えます。ファイルは次のとおりです。
+プロジェクトは Emacs のファイルシステムの `/home/user/elisp-studio/app` にあります。ブラウザが保持するので、次に開いたときも残っています。新しいプロジェクトは `template/` から作られます。アドレスに `?example=stopwatch` や `?example=sqlite` を付けると、`examples/` の該当するディレクトリから作られます。すでにあるプロジェクトが置き換えられることはありません（最初からやり直すには、Emacs の中でこのディレクトリを削除します）。これは wasmacs のページが使っているのと同じ `/home/user` なので、wasmacs を直接開いたときにもプロジェクトが見えます。ファイルは次のとおりです。
 
 ```text
 index.html   ページ。<div id="app">、スタイルシート、<script type="text/emacs-lisp" src="app.el">
@@ -78,21 +78,47 @@ Emacs でプロジェクトのファイルを開いているときに使える�
     ...))
 ```
 
-関数は Lisp のデータを返します。ページはそれを印字された形で受け取り、読み戻します。関数がエラーを起こすと、そのエラーがレスポンスになります。`app-server-read` と `app-server-write` で、リクエストをまたいで Lisp のデータを保持できます。
+関数は Lisp のデータを返します。ページはそれを印字された形で受け取り、読み戻します。関数がエラーを起こすと、そのエラーがレスポンスになります。`(app-server-parameter "name")` で、リクエストの `?name=...` の値を取得できます。
+
+サーバーがデータを保持する方法は2つあります。
+
+- `app-server-read` と `app-server-write`：Lisp の値をファイルに保存します。
+- `(app-server-database)`：SQLite のデータベースです。Emacs 自身の `sqlite-execute` と `sqlite-select` で使います。ドライバも別のプログラムも要りません。SQLite は Emacs の一部です。
+
+```elisp
+(let ((db (app-server-database)))
+  (sqlite-execute db "CREATE TABLE IF NOT EXISTS books (id INTEGER PRIMARY KEY, title TEXT NOT NULL)")
+  (sqlite-execute db "INSERT INTO books (title) VALUES (?)" (list title))     ; SQL の文字列ではなくパラメータとして渡す
+  (sqlite-select db "SELECT id, title FROM books WHERE title LIKE ?" (list (concat "%" search "%"))))
+```
+
+[`examples/sqlite`](examples/sqlite) は、この方法でデータを持つ読書リストです（[試す](https://modeverv.github.io/elisp-studio/?example=sqlite)）。studio の中では、データベースはサーバー役の Emacs のメモリ上のファイルで、studio がブラウザ（IndexedDB）に保存して次回に引き継ぎます。ネイティブの Emacs で動かすと `.data/app.db` というファイルになり、`sqlite3` コマンドでも開けます。
+
+SQLite の同梱について：SQLite は[パブリックドメイン](https://www.sqlite.org/copyright.html)なので、配布に条件はありません。ブラウザで動く Emacs には、wasmacs がリンクしています（wasmacs の README の「同梱ソフトウェアとライセンス」を参照）。ネイティブの Emacs は、SQLite つきでビルドされていれば使えます。通常のパッケージはそうなっています（`(sqlite-available-p)` で確認できます）。このリポジトリにも、ダウンロードしたプロジェクトにも、SQLite 自体は含まれません。
 
 studio の中では、サーバーはブラウザのタブの中の3つ目の Emacs です。アプリケーションから `/api/...` へのリクエストはタブの外に出ず、studio がその Emacs に渡します。`server.el` を保存すると、動いているサーバーが変わります。
 
-同じプロジェクトを、ネイティブの Emacs を Web サーバーにして本番として動かせます。
+同じプロジェクトを、ネイティブの Emacs を Web サーバーにして本番として動かせます。そのためのスクリプトは、ダウンロード（次の節）に入っています。
 
 ```sh
-tools/serve-project.sh /path/to/the/project 8018     # http://127.0.0.1:8018/ を開く
+./run.sh            # http://127.0.0.1:8018/ を開く
 ```
 
 プロジェクトのファイルを配信し、`/api/...` には同じ `server.el` で答えます。サーバーが保持するデータはプロジェクトの `.data/` に置かれます。ページの Emacs Lisp は、これまでどおり閲覧者のブラウザの中で動きます。
 
 ## プロジェクトを外に出す
 
-- ヘッダーの **download .zip**：プロジェクトのファイルを1つのアーカイブにします。
+- ヘッダーの **download .zip**：プロジェクトを1つのアーカイブにします。bash と GNU Emacs（29以降）があれば、それだけで動きます。
+
+  ```text
+  index.html, app.el, style.css, server.el    プロジェクト
+  run.sh              ./run.sh [PORT]。Emacs がこのディレクトリの Web サーバーになる
+  fetch-emacs.sh      任意。ブラウザ用の Emacs を vendor/ にダウンロードする（約160MB、curl が必要）
+  server/             run.sh が Emacs に読み込ませるもの（HTTP サーバーと app-server.el）
+  README.txt
+  ```
+
+  `./run.sh` を実行すると、Emacs がページを配信し、ページからのリクエストに答えます。ブラウザの中でページの `app.el` を動かす Emacs は、通常はページが wasmacs のサイトからダウンロードします。`./fetch-emacs.sh` を実行したあとは、同じ Emacs が `vendor/` から配信するようになり、インターネットは不要になります。
 - Emacs の **`C-c C-p`**（`M-x elisp-studio-publish`）：Emacs の中で動く git で `git add`、`git commit` を行い、`origin` というリモートがあれば `git push` します。GitHub へ HTTPS で push するには、[wasmacs の companion 拡張](https://github.com/modeverv/wasmacs#network-access)と、リモートの認証情報が必要です（最初に1回、`M-x shell` で `cd ~/elisp-studio/app`、`git remote add origin https://github.com/YOU/REPOSITORY.git`）。`server.el` のないプロジェクトを GitHub Pages を有効にしたリポジトリに push すれば、そのまま Web に公開されます。
 
 ## 言語サーバー（LSP）は？
@@ -123,6 +149,7 @@ npm run serve            # http://127.0.0.1:5190/elisp-studio/
 npm run test:unit        # tar、zip、ネイティブの Emacs で配信したプロジェクト
 npm run test:e2e         # headless Chrome で studio を操作
 npm run test:e2e:plain   # 同じテストを、GitHub Pages と同じく分離ヘッダーなしで実行
+npm run test:e2e:sqlite  # SQLite のサンプル。studio の中で動かし、ダウンロードして単独でも動かす
 node tools/record-demo.mjs   # この README の画像を録画し直す（ffmpeg が必要）
 ```
 
@@ -134,4 +161,5 @@ node tools/record-demo.mjs   # この README の画像を録画し直す（ffmpe
 - アプリケーションの実行中に起きたエラーには、場所の情報がありません。
 - 編集中の Emacs は、バッファを検査するときにプロジェクトのマクロを展開します。無限ループするマクロを書くと、エディタが固まります。
 - GitHub への push は、Emacs 自身のファイルシステム内のリポジトリに対してだけテストしています。companion 拡張を通る経路は wasmacs のもので、そちらでテストされています。
-- タブの中のサーバーは、データを `localStorage` に保存します。小さなデータ向けです。
+- タブの中のサーバーは、データのディレクトリをメモリ上に持ちます。studio は、内容を変えたリクエストのあとでそれを IndexedDB にコピーします。小さなデータベースなら問題ありませんが、大きなものには向きません。
+- `run.sh` は 127.0.0.1 でだけ待ち受けます。1つの Emacs がリクエストを1件ずつ順に処理します。
