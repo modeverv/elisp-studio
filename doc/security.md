@@ -59,9 +59,15 @@ The sample server of elisp-react (`examples/server/server.el`) had findings 1, 2
 - **A POST without an Origin is accepted**, for programs that are not browsers. Browsers send one with every POST to another site, and those are refused. There is no CSRF token.
 - **Other users of the server's machine** can connect to the port directly, past the proxy, and say anything in `X-Forwarded-For` or in a header a proxy would set to name the signed-in user. A machine with untrusted local users is not the place for this server.
 - **What `server.el` does is its author's business**: `read` on a body (finding 2), a visitor's text as the URL for `app-server-fetch` (requests to wherever the server can reach), an uploaded file sent back as `text/html` (a page under the application's name; the default type and `:name` avoid it), a `GET` that changes things.
+- **A session is whoever holds its cookie**, for thirty days or until it is ended. It is not tied to an address or a browser and is not renewed. `HttpOnly` keeps it from the page's scripts and `Secure` from plain HTTP; a visitor whose machine is read by someone else is that someone.
 - **One thread.** A handler that computes for long holds up everyone; handlers that wait inside Emacs are turned away beyond 32 deep (503).
 - **Not examined:** the studio page and the wasm Emacs in the browser beyond reading; elisp-react's rendering (text is set as text, not as HTML, but that was not attacked); runs longer than a quarter of an hour; Emacs versions other than 31.1 here and 29 in CI; Windows.
 - This was a check by the people who wrote the code, with tools. It is not a penetration test by someone paid to break in, and "nothing more was found" is not "nothing more is there".
+
+## Since the check
+
+- **2026-11-15, random bytes in the studio's tab.** `app-server-token` read `/dev/urandom` with a start position, which the browser's Emacs 30.2 refuses for a device, and in the tab fell back to Emacs's `random`, which is not a generator for secrets. Nobody but the tab's own page reaches that server, so nothing was exposed. It now reads without a start position, gets the browser's `crypto.getRandomValues`, and has no fallback; the browser test signs in in the tab, which fails without those bytes.
+- **2026-11-15, tokens.** What the server has for signing in ends at sessions. The README ("Tokens") says what was tried about JWTs: one the application signs itself is possible in `server.el`, one signed by somebody else cannot be checked, and a token does not get a page of another site past the origin check (a preflight is answered with 403).
 
 ## Doing it again
 

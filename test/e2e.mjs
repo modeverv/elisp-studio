@@ -272,6 +272,7 @@ try {
     ('("POST" "/api/login") (app-server-set-cookie "session" (app-server-token 8)) (app-server-set-header "X-Greeting" "hello") t)
     ('("GET" "/api/me") (or (app-server-cookie "session") (app-server-refuse "Sign in first" 401)))
     ('("POST" "/api/logout") (app-server-delete-cookie "session") t)
+    ('("GET" "/api/bearer") (app-server-header "authorization"))
     ('("POST" "/api/hash")
      (app-server-defer (lambda (respond _fail) (app-server-password-hash-later (car (read-from-string body)) respond))))
     ('("POST" "/api/signin") (app-server-attempts-check "ada") (app-server-attempts-failed "ada") (app-server-session-start "ada"))
@@ -307,7 +308,8 @@ try {
   assert.match((await viaServer("/api/me"))[1], /^"[0-9a-f]{16}"$/);
   await viaServer("/api/logout", { method: "POST" });
   assert.equal((await viaServer("/api/me"))[0], 401);
-  pass("server.el reads and sets headers and cookies; a refusal carries its status");
+  assert.equal((await viaServer("/api/bearer", { headers: { Authorization: "Bearer abc.def.ghi" } }))[1], '"Bearer abc.def.ghi"');
+  pass("server.el reads and sets headers and cookies, and gets the page's Authorization header; a refusal carries its status");
 
   // Sessions and the limit on attempts, kept in the tab's own SQLite.
   assert.equal((await viaServer("/api/who"))[1], "nil");

@@ -392,25 +392,22 @@ request) or, when server.el refused it, the answer [STATUS TEXT HEADERS]."
 
 (defun app-server-token (&optional bytes)
   "A random string nobody can guess: BYTES (default 32) random bytes in hex.
-For the names of sessions and the like; `random' is not for that.  (In
-the studio's browser tab, which nobody else can reach, it is what there
-is: that Emacs has no better source.)"
+For the names of sessions and the like; `random' is not for that.  The
+bytes are the system's (/dev/urandom); in the studio's browser tab that
+is the browser's own generator."
   (let* ((bytes (or bytes 32))
          (data (with-temp-buffer
                  (set-buffer-multibyte nil)
                  (condition-case nil
-                     (insert-file-contents-literally "/dev/urandom" nil 0 bytes)
-                   ;; An older Emacs does not read part of a device.
+                     ;; No start position: Emacs 30 refuses one for a device.
+                     (insert-file-contents-literally "/dev/urandom" nil nil bytes)
+                   ;; Emacs 29 does not read part of a device at all.
                    (error (erase-buffer)
                           (ignore-errors
                             (let ((coding-system-for-read 'binary))
                               (call-process "head" "/dev/urandom" t nil "-c" (number-to-string bytes))))))
                  (buffer-string))))
-    (cond ((= (length data) bytes))
-          (app-server--tab
-           (random t)
-           (setq data (apply #'unibyte-string (cl-loop repeat bytes collect (random 256)))))
-          (t (error "This system gives no random bytes")))
+    (unless (= (length data) bytes) (error "This system gives no random bytes"))
     (mapconcat (lambda (byte) (format "%02x" byte)) data "")))
 
 ;;;; Passwords

@@ -193,15 +193,29 @@ The page sends the file itself as the body, not a form. In elisp-react that is o
 ('("POST" "/api/logout") (app-server-session-end) t)
 ```
 
-- **Sessions.** `(app-server-session-start VISITOR)` gives the browser a cookie with a random name for the session and keeps a hash of that name with VISITOR (any Lisp data: a name, a number, a plist) and an expiry, so the database holds nothing that would let someone in. `(app-server-session)` is VISITOR on later requests, or nil. `(app-server-session-end)` signs out; `(app-server-session-end-all VISITOR)` signs out everywhere, for when a password was changed.
+- **Sessions.** `(app-server-session-start VISITOR)` gives the browser a cookie with a random name for the session and keeps a hash of that name with VISITOR (any Lisp data: a name, a number, a plist) and an expiry, so the database holds nothing that would let someone in. `(app-server-session)` is VISITOR on later requests, or nil. `(app-server-session-end)` signs out; `(app-server-session-end-all VISITOR)` signs out everywhere, for when a password was changed. The cookie is `HttpOnly` (neither the page's Lisp nor a script sees it), `SameSite=Lax`, and `Secure` when the proxy says the request came over HTTPS. A session ends thirty days after it began (`app-server-session-days`, or a second argument in days); using it does not extend it.
 - **A limit on guesses.** `(app-server-attempts-check NAME ADDRESS ...)` refuses with 429 and `Retry-After` when there were five failures in ten minutes for one of its arguments (`app-server-attempts-max`, `app-server-attempts-seconds`); `-failed` notes a failure, `-clear` forgets them. Counting by account stops guesses at one account from many addresses, counting by address stops one address trying many accounts. `(app-server-visitor-address)` is what the reverse proxy says; without a proxy everyone is this machine and only the account counts.
 - **Short passwords** (under `app-server-password-min-length`, 8) are refused when a hash is to be made: no hash makes those hard to guess.
 - **Old hashes.** After the rounds were raised or the algorithm changed, `(app-server-password-needs-rehash-p HASH)` says which hashes to make again, at the one moment the password is at hand: right after it checked.
 - **Not telling which names exist.** A check for an account that does not exist takes as long as one for an account that does.
 
-Sessions and failures are in an SQLite database of their own, `.data/server.db`: workers share them, and a restart signs nobody out.
+Sessions and failures are in an SQLite database of their own, `.data/server.db`: workers share them, and a restart signs nobody out. An Emacs without SQLite keeps them in memory instead: there a restart signs everybody out, and workers do not share them.
 
 An application for people who already have an account somewhere needs none of this. Let the proxy sign them in (Caddy's `forward_auth` or `basic_auth`, oauth2-proxy in front of nginx) and read who it is from the header the proxy sets, `(app-server-header "x-forwarded-user")` or whatever it is called there. The proxy must overwrite that header on every request, or a visitor could set it.
+
+### Tokens (JWT)
+
+A session is the server's note of who signed in. A JWT is the other arrangement: the visitor carries a signed note and the server keeps nothing. This server has sessions, and no functions for JWTs. What can be done about them was tried on 2026-11-15; none of it is shipped or covered by the tests.
+
+| | |
+|---|---|
+| A token the application signs and checks itself (HS256: HMAC-SHA-256 with a secret) | Possible in `server.el`, in under thirty lines, with what every Emacs has: `secure-hash`, `base64url-encode-string`, `json-serialize`, `json-parse-string`; HMAC is six lines on `secure-hash`. With the same code, a native Emacs 31.1 and the browser's Emacs 30.2 verified a known token and refused a wrong secret, `alg: none` and an expired token. A check takes 0.1 ms uncompiled. |
+| Carrying it | The page sends it with `react-fetch`'s `:headers (:authorization "Bearer …")` and `server.el` reads `(app-server-header "authorization")`. Tried from Chrome against a native server; the studio's tab hands the header to `server.el` the same way (the browser test asks for it). |
+| A token somebody else signed (RS256, ES256: Google, Microsoft Entra ID, any OpenID Connect provider) | Not possible. It takes a public-key signature check, and Emacs has no function for one. A native server would have to call a program such as `openssl` (not tried); the browser's Emacs has no program to call. Signing in through such a provider is the proxy's job (the paragraph above). |
+
+For the application's own sign-in the session is the better fit. Signing out takes effect at once, on every device if wanted; a signed token stays good until it runs out, unless the server keeps a list of the ones it took back, which is a session again. What a token saves is a store shared by the workers, and they have one. A token earns its place when another program must check who someone is without asking this server; with HS256 that program needs the same secret.
+
+Whoever writes it: accept one algorithm, never the one the token names; check `exp`; compare the two signatures without stopping at the first difference (compare their `secure-hash`es); keep the secret in `.data/`, which is never served, or in the environment, the same for all workers (changing it ends every token). A token does not open the API to pages of other sites: their requests are refused whatever they carry, a CORS preflight included (403).
 
 ### Passwords
 
@@ -256,7 +270,7 @@ Tried with Caddy 2.11 (HTTPS with HTTP/2) and nginx 1.30 in front, with the ship
 
 [doc/security.md](doc/security.md) is the record of a security check of this server (OWASP ZAP, about a hundred hand-made requests, an independent reading of the code): two serious problems and nine lesser ones were found and fixed, and it says what was left as it is. In short: a request could make the server open an SSH connection to a machine of the sender's choice, and a visitor could fill its memory; neither is possible any more, and a test fails if either comes back.
 
-What is not there: streaming answers and WebSockets, forms that upload (`multipart/form-data`; a page sends the file itself), and ranges of a file (a video cannot be skipped through). Nobody has attacked this server in earnest: it is a few hundred lines of Emacs Lisp behind a proxy, for applications among friends.
+What is not there: streaming answers and WebSockets, functions for tokens and answers to pages of other sites ("Tokens" above), forms that upload (`multipart/form-data`; a page sends the file itself), and ranges of a file (a video cannot be skipped through). Nobody has attacked this server in earnest: it is a few hundred lines of Emacs Lisp behind a proxy, for applications among friends.
 
 ### How fast is that server?
 
@@ -356,4 +370,4 @@ node tools/record-demo.mjs   # record the pictures of this README again (needs f
 - Pushing to GitHub has been tested only against a repository inside Emacs's own filesystem; the path through the companion extension is wasmacs's and is tested there.
 - The server in the tab keeps its data directory in memory and the studio copies it to IndexedDB after a request that changed it: fine for a small database, not for a large one.
 - `run.sh` listens on 127.0.0.1; publishing it, and using more than one core, takes a reverse proxy in front ("Publishing it" above says what is and is not there).
-- In the studio's tab, `app-server-token` has only Emacs's `random` to draw on, scrypt hashes cannot be made or checked, an uploaded file is 32 MB at most, and cookies last until the studio is reloaded: it is the place to write the application, not to run it for others.
+- In the studio's tab scrypt hashes cannot be made or checked, an uploaded file is 32 MB at most, and cookies last until the studio is reloaded: it is the place to write the application, not to run it for others.
