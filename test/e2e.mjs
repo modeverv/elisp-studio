@@ -23,7 +23,7 @@ if (!origin) ({ server, origin } = await serve({ plain }));
 const slow = Boolean(process.env.E2E_SITE);
 
 const workDir = await mkdtemp(join(tmpdir(), "elisp-studio-"));
-let chrome = null, client = null;
+let chrome = null, client = null, pageSession = null;
 try {
   chrome = spawn(chromePath, [
     "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--window-size=1400,800",
@@ -32,6 +32,7 @@ try {
   client = new CdpClient(await devToolsUrl(chrome));
   const { targetId } = await client.send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await client.send("Target.attachToTarget", { targetId, flatten: true });
+  pageSession = sessionId;
   await client.send("Page.enable", {}, sessionId);
   await client.send("Runtime.enable", {}, sessionId);
   const js = (expression) => evaluate(client, sessionId, expression);
@@ -105,6 +106,46 @@ try {
   assert.equal(await app("document.querySelector('.count').textContent"), "Clicks so far: 14");
   pass("a broken edit is reported and leaves the application running; the fix clears the error");
 
+  // What the application's Emacs says is shown in the editing Emacs.
+  // The terminal's text; a line that Emacs wrapped (it ends in a backslash) is joined again.
+  const screen = async () => (await js("document.querySelector('#editor').contentWindow.__wasmacsDebugScreenText()"))
+    .split("\n").map((row) => row.trimEnd()).join("\n").replace(/\\\n/g, "");
+  const screenUntil = (pattern, label) => waitUntil(async () => pattern.test(await screen()), label, 30_000);
+  await editFile("app.el", "(react-set-state self :count 0)", "(progn (function-that-is-not-there) (react-set-state self :count 0))");
+  await screenUntil(/Warning: the function .function-that-is-not-there. is not known/, "the compiler's warning appears in Emacs");
+  const warningScreen = await screen();
+  assert.match(warningScreen, /\/home\/user\/elisp-studio\/app\/app\.el:\d+:\d+: Warning/);
+  assert.match(warningScreen, /\*elisp-studio\*/);
+  assert.match(await status(), /app\.el updated/);
+  // RET on the warning's line, as in any compilation buffer: the place in app.el.
+  await emacsEval('(progn (next-error) (message "jumped-to-%s-%s" (buffer-name) (looking-at-p "function-that-is-not-there")))');
+  await screenUntil(/jumped-to-app\.el-t/, "next-error jumps to the place of the warning");
+  await editFile("app.el", "(progn (function-that-is-not-there) (react-set-state self :count 0))", "(react-set-state self :count 0)");
+  await waitUntil(async () => !/\*elisp-studio\*/.test(await screen()), "the log window goes away when there is nothing to say", 30_000);
+  pass("compiler warnings appear in Emacs with their places (next-error jumps there) and go away when fixed");
+
+  await editFile("app.el", '(h1 "Fixed")', '(h1 "Fixed"');
+  await screenUntil(/End of file during parsing/, "a syntax error appears in Emacs");
+  assert.equal(await app("document.querySelector('h1').textContent"), "Fixed");
+  await editFile("app.el", '(h1 "Fixed"', '(h1 "Fixed")');
+  await until("/app\\.el updated/.test(document.querySelector('#status').textContent)", "the repaired file is applied");
+  pass("a file that does not read is reported in Emacs; the application runs on");
+
+  // C-M-x: one definition, without saving.
+  await emacsEval(`(with-current-buffer "app.el"
+    (goto-char (point-min))
+    (search-forward "(h1 \\"Fixed\\")")
+    (replace-match "(h1 \\"Not saved\\")" t t)
+    (elisp-studio-eval-defun)
+    (message "modified-%s" (buffer-modified-p)))`);
+  await appUntil("document.querySelector('h1').textContent === 'Not saved'", "the definition reaches the application");
+  assert.match(await status(), /a definition of app\.el evaluated/);
+  assert.equal(await app("document.querySelector('.count').textContent"), "Clicks so far: 14");
+  assert.equal(await js("window.elispStudio.files.get('app.el').includes('Not saved')"), false);
+  await emacsEval('(with-current-buffer "app.el" (goto-char (point-min)) (search-forward "(h1 \\"Not saved\\")") (replace-match "(h1 \\"Fixed\\")" t t) (save-buffer))');
+  await appUntil("document.querySelector('h1').textContent === 'Fixed'", "back to the saved text");
+  pass("C-M-x sends the definition at point to the running application; the file is not saved, the state is kept");
+
   // An endless loop in the application: it is replaced, the editor lives.
   await editFile("app.el", '(h1 "Fixed")', '(h1 (progn (while t) "never"))');
   await until("/did not start/.test(document.querySelector('#status').textContent)", "the hang is noticed and the stuck application is taken away", 90_000);
@@ -120,9 +161,13 @@ try {
   pass("a changed index.html starts the application again");
   console.log("e2e passed");
 } catch (error) {
+  // What the studio and Emacs showed when it went wrong.
   try {
-    console.error("status:", await evaluate(client, undefined, "1").catch(() => ""));
-  } catch (_) { /* ignore */ }
+    const show = (expression) => evaluate(client, pageSession, expression).catch((failure) => `(${failure.message})`);
+    console.error("status:", await show("document.querySelector('#status').textContent"));
+    console.error("error :", await show("document.querySelector('#error').textContent"));
+    console.error("emacs :\n" + await show("document.querySelector('#editor').contentWindow.__wasmacsDebugScreenText().split('\\n').map((row) => row.trimEnd()).filter(Boolean).join('\\n')"));
+  } catch (_) { /* the browser is gone */ }
   throw error;
 } finally {
   client?.close();

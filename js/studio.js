@@ -76,12 +76,49 @@ async function editorUrl() {
       (make-directory ${lispString(PROJECT)} t)
       ${template.map(([name, text]) => `(write-region ${lispString(text)} nil ${lispString(`${PROJECT}/${name}`)} nil 'silent)`).join("\n      ")}))`);
   url.searchParams.append("extra-eval", `(find-file ${lispString(`${PROJECT}/app.el`)})`);
+  // The editor's side of the studio: lisp/elisp-studio.el.
+  const editorLisp = await fetch(new URL("lisp/elisp-studio.el", here), { cache: "no-store" });
+  if (!editorLisp.ok) throw new Error(`lisp/elisp-studio.el: HTTP ${editorLisp.status}`);
+  url.searchParams.append("extra-eval", `(progn
+    (write-region ${lispString(await editorLisp.text())} nil "/tmp/elisp-studio.el" nil 'silent)
+    (load "/tmp/elisp-studio.el" nil t))`);
   return url.href;
+}
+
+// Tell Emacs something: JSON, typed into its terminal between two escape
+// sequences (lisp/elisp-studio.el reads it like a bracketed paste).
+function tellEditor(message) {
+  const json = new TextEncoder().encode(JSON.stringify(message));
+  let binary = "";
+  for (const byte of json) binary += String.fromCharCode(byte);
+  const bytes = [...new TextEncoder().encode(`\x1b[7777~${btoa(binary)}\x1b[7778~`)];
+  editorFrame.contentWindow?.postMessage({ type: "wasmacs:input", bytes }, location.origin);
+}
+
+// The compiler speaks of the file as the application's Emacs has it; the
+// editor has it under its own name.
+function editorLog(log, loaded, path) {
+  if (!log) return "";
+  const inApp = (loaded?.file || "").split("/").pop();
+  const inEditor = `${PROJECT}/${path}`;
+  return inApp ? log.split(inApp).join(inEditor) : log;
+}
+
+// What happened to a change: the status line here, and the same in Emacs
+// (with the compiler's messages, where one can jump to their places).
+function report(status, summary, log = "") {
+  setStatus(summary, status);
+  tellEditor({ type: "log", status, summary: `elisp-studio: ${summary}`, log });
 }
 
 // ---- the application --------------------------------------------------------------
 
 let files = new Map();        // the project as the application has it: path -> text
+// Files of which the application has a definition that was never saved
+// (C-M-x).  When Emacs saves such a file, the application gets the file
+// again, even if its text is what the application was given before.
+const unsaved = new Set();
+const savedAgain = new Set();
 let preview = null;           // { frame, app, sources: Map(path -> name), styles: Map(path -> <style>) }
 let generation = 0;
 
@@ -160,8 +197,9 @@ async function startPreview(project, why) {
     frame.contentDocument.addEventListener("elisp-react:error", (event) => {
       if (preview !== current) return;
       const error = event.detail;
-      setStatus("error in the application", "error");
-      showError(`${error?.symbol ? `${error.symbol}: ` : ""}${error?.message || error}`);
+      const text = `${error?.symbol ? `${error.symbol}: ` : ""}${error?.message || error}`;
+      showError(text);
+      report("error", "error in the application", text);
     });
     const app = await withTimeout(frame.contentWindow.__studio.start({
       wasmacs: WASMACS.href,
@@ -174,7 +212,10 @@ async function startPreview(project, why) {
     for (const path of built.styles) {
       current.styles.set(path, frame.contentDocument.querySelector(`style[data-studio-file="${CSS.escape(path)}"]`));
     }
-    setStatus(`${why}: the application runs (Emacs ${app.version}, ${clock()})`, "ok");
+    const log = app.compileLogs
+      .map((entry) => editorLog(entry.log, entry, built.sources.find((source) => source.name === entry.name)?.path))
+      .filter(Boolean).join("\n\n");
+    report("ok", `${why}: the application runs (Emacs ${app.version}, ${clock()})`, log);
   } catch (error) {
     if (mine !== generation) return;
     // Take the frame away: that also ends an Emacs that is stuck in the
@@ -182,14 +223,19 @@ async function startPreview(project, why) {
     // starts a new one.
     frame.remove();
     preview = null;
-    setStatus("the application did not start; it starts again when a file changes", "error");
     showError(error.message || String(error));
+    report("error", "the application did not start; it starts again when a file changes",
+           `${error.log ? `${error.log}\n\n` : ""}${error.message || error}`);
   }
 }
 
 // The editor has NEXT; the application has `files`.  Bring it up to date.
 async function applyProject(next) {
-  const changed = [...next.keys()].filter((path) => next.get(path) !== files.get(path));
+  const changed = [...next.keys()].filter((path) => next.get(path) !== files.get(path) || savedAgain.has(path));
+  for (const path of changed) {
+    unsaved.delete(path);
+    savedAgain.delete(path);
+  }
   const first = files.size === 0;
   files = next;
   if (first) return startPreview(next, "project loaded");
@@ -198,13 +244,15 @@ async function applyProject(next) {
     return startPreview(next, changed.includes("index.html") ? "index.html changed" : `${changed[0]} changed`);
   }
   const done = [];
+  const logs = [];
   for (const path of changed) {
     if (preview.styles.has(path)) {
       preview.styles.get(path).textContent = next.get(path);
       done.push(path);
     } else if (preview.sources.has(path)) {
       try {
-        await withTimeout(preview.app.load(preview.sources.get(path), next.get(path)), LOAD_TIMEOUT_MS, "the application");
+        const loaded = await withTimeout(preview.app.load(preview.sources.get(path), next.get(path)), LOAD_TIMEOUT_MS, "the application");
+        if (loaded.log) logs.push(editorLog(loaded.log, loaded, path));
         done.push(path);
       } catch (error) {
         if (/did not answer/.test(error.message)) {
@@ -212,15 +260,34 @@ async function applyProject(next) {
           await startPreview(next, `${path} made the application hang; restarted`);
           return;
         }
-        setStatus(`${path}: not applied (the application runs on with the old code)`, "error");
-        showError(`${error.symbol ? `${error.symbol}: ` : ""}${error.message}`);
+        const text = `${error.symbol ? `${error.symbol}: ` : ""}${error.message}`;
+        showError(text);
+        report("error", `${path}: not applied (the application runs on with the old code)`,
+               `${error.log ? `${editorLog(error.log, error, path)}\n\n` : ""}${text}`);
         return;
       }
     }
   }
   if (done.length) {
     showError("");
-    setStatus(`${done.join(", ")} updated at ${clock()}: no reload, state kept`, "ok");
+    report("ok", `${done.join(", ")} updated at ${clock()}: no reload, state kept`, logs.join("\n\n"));
+  }
+}
+
+// C-M-x in Emacs: one definition, evaluated in the running application.
+async function evalInApplication(file, text) {
+  if (!preview?.app) return report("error", "the application is not running");
+  if (!preview.sources.has(file)) return report("error", `${file} is not part of the running application`);
+  try {
+    await withTimeout(preview.app.run(text), LOAD_TIMEOUT_MS, "the application");
+    unsaved.add(file);
+    showError("");
+    report("ok", `a definition of ${file} evaluated at ${clock()}: state kept (not saved yet)`);
+  } catch (error) {
+    if (/did not answer/.test(error.message)) return startPreview(files, "the application hung; restarted");
+    const message = `${error.symbol ? `${error.symbol}: ` : ""}${error.message}`;
+    showError(message);
+    report("error", `the definition of ${file} was not applied`, message);
   }
 }
 
@@ -238,7 +305,21 @@ function onUserImage(bytes) {
 window.addEventListener("message", (event) => {
   if (event.origin !== location.origin || event.source !== editorFrame.contentWindow) return;
   if (event.data?.type === "wasmacs:user-image") onUserImage(new Uint8Array(event.data.bytes));
+  if (event.data?.type === "wasmacs:message") onEditorMessage(event.data.text);
 });
+
+// What lisp/elisp-studio.el sends.
+function onEditorMessage(text) {
+  let message;
+  try { message = JSON.parse(text); } catch (_) { return; }
+  if (message.type === "eval") {
+    queue = queue.then(() => evalInApplication(message.file, message.text)).catch(() => {});
+  }
+  // The file image that follows a save may be the same text as before.
+  if (message.type === "saved") {
+    queue = queue.then(() => { if (unsaved.has(message.file)) savedAgain.add(message.file); });
+  }
+}
 
 document.querySelector("#restart").addEventListener("click", () => {
   if (files.size) queue = queue.then(() => startPreview(files, "restarted"));
