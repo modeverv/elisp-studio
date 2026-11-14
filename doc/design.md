@@ -59,9 +59,16 @@ Two more channels connect the page and the editing Emacs, both through the termi
 
 ### Results and diagnostics
 
-elisp-react's host byte-compiles each file in the application's Emacs and returns what the compiler printed. The studio replaces the file's name inside that Emacs by the project file's name in the editor and sends the text along with the one-line result. In the editor it is shown in `*elisp-studio*` in `compilation-mode`, and parsed into Flymake diagnostics for the files it is about (`elisp-studio-flymake`; Emacs's own Emacs Lisp backends start a second Emacs process, which is not possible here).
+elisp-react's host byte-compiles each saved file in the application's Emacs and returns what the compiler printed. The studio replaces the file's name inside that Emacs by the project file's name in the editor and sends the text along with the one-line result. In the editor it is shown in `*elisp-studio*` in `compilation-mode`.
 
-The editor also loads `react.el` and `app-server.el` from files. They do nothing there, but their functions exist, so completion, ElDoc, `C-h f` and `M-.` work for them like for any Emacs Lisp.
+Diagnostics while typing do not wait for that round trip. Emacs's own Flymake backends for Emacs Lisp start a second Emacs process, which is not possible here, so `elisp-studio-flymake` compiles in the editing Emacs itself: the buffer's text goes to a scratch file, `byte-compile-file` reads it, and `byte-compile-log-warning-function` collects the messages with their positions instead of logging them. Compiling does not run the program. It does expand macros, the project's own included.
+
+### What the editor knows
+
+For completion, ElDoc, `C-h f` and `M-.`, and for the compiler not to call every function unknown, the editing Emacs has to have the functions the project uses, without being the application.
+
+- The libraries, `react.el` and `app-server.el`, are simply loaded (from files, so that `M-.` has a place to go). They do nothing there.
+- The project's own files are not loaded: their top level is the program (`react-mount`, requests, timers). `elisp-studio-learn-file` reads a file form by form and takes only definitions: functions, macros, structures and errors are evaluated (their bodies are not called by anything in the editor), variables are declared and given their documentation but not their values, and everything else is skipped. Each definition is entered in `load-history` under the file's name, which is what `M-.` looks up. This happens for the whole project when the editor starts and for a file whenever it is saved.
 
 ### C-M-x
 
@@ -83,6 +90,6 @@ The studio already has the project's files (it reads them from the editor's imag
 ## What is not there yet
 
 - More than one project, and a way to start a new one from the page.
-- Diagnostics while typing, and locations for errors that happen while the application runs.
+- Locations for errors that happen while the application runs.
 - A language server for anything but Emacs Lisp: Eglot is there, a server program for wasmacs's process service is not.
 - A button for the whole way to a public URL (create the repository, push, enable Pages).

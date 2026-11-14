@@ -52,10 +52,10 @@ In Emacs, in a file of the project:
 | `C-x C-s` | Save: the change reaches the application as described above. |
 | `C-M-x` | Send the definition at point to the running application (or server) without saving. |
 | `C-c C-p` | Publish: commit the project with git and push it (see below). |
-| `C-M-i`, `M-.`, `C-h f` | Complete, find and describe functions, including those of elisp-react. ElDoc shows arguments while you type. |
+| `C-M-i`, `M-.`, `C-h f` | Complete, find and describe functions: Emacs's, those of elisp-react, and the project's own once the file that defines them is saved. ElDoc shows arguments while you type. |
 | `M-g n`, `M-g p` | Go to the next or previous place the compiler complained about. |
 
-What the application's Emacs says about a change comes back into the editing Emacs: one line in the echo area, the compiler's warnings and errors in the buffer `*elisp-studio*` (a compilation buffer: `RET` jumps to the place), and the same as Flymake diagnostics in the file's buffer.
+While you type, Flymake marks what the byte compiler would complain about: the editing Emacs compiles the buffer's text a moment after each change, without saving or running it. What the application's Emacs says about a saved file comes back too: one line in the echo area, and the compiler's warnings and errors in the buffer `*elisp-studio*` (a compilation buffer: `RET` jumps to the place).
 
 A mistake does not take the application down: if the new code does not load, the error is shown under the application and the old code keeps running. An endless loop does take it down, and only it: the studio starts a new application at the next save, and Emacs keeps editing. The "restart app" button starts the application again from the files.
 
@@ -89,7 +89,7 @@ It serves the project's files and answers `/api/...` with the same `server.el`; 
 
 ## Language servers?
 
-Emacs's LSP client, Eglot, is in this Emacs and loads. What is missing is a language server to talk to: it would have to be a program built for wasmacs's process service, and none is. For Emacs Lisp no server is needed: completion, documentation and jumping to definitions are Emacs's own, and the studio adds the diagnostics from the compiler that runs anyway.
+Emacs's LSP client, Eglot, is in this Emacs and loads. What is missing is a language server to talk to: it would have to be a program built for wasmacs's process service, and none is. For Emacs Lisp no server is needed: completion, documentation and jumping to definitions are Emacs's own, and the diagnostics come from Emacs's byte compiler.
 
 ## How it works
 
@@ -122,6 +122,7 @@ npm run test:e2e:plain   # the same without isolation headers, as GitHub Pages s
 - Chrome on a desktop. Two Emacsen run in the tab: several hundred megabytes of memory.
 - One project.
 - After a hot change, `:initial-state` and `:did-mount` of existing components are not run again; use "restart app" for a clean start.
-- Diagnostics come from the compiler when a file is saved, not while typing. Errors that happen while the application runs have no location.
+- Errors that happen while the application runs have no location.
+- The editing Emacs expands the project's macros when it checks a buffer. A macro that loops forever would hang the editor.
 - Pushing to GitHub has been tested only against a repository inside Emacs's own filesystem; the path through the companion extension is wasmacs's and is tested there.
 - The server in the tab keeps its data in `localStorage`: small data only.

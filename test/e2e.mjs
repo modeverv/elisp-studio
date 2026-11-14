@@ -111,6 +111,13 @@ try {
   const screen = async () => (await js("document.querySelector('#editor').contentWindow.__wasmacsDebugScreenText()"))
     .split("\n").map((row) => row.trimEnd()).join("\n").replace(/\\\n/g, "");
   const screenUntil = (pattern, label) => waitUntil(async () => pattern.test(await screen()), label, 30_000);
+  // Ask Emacs something (a form without side effects) until the answer is
+  // on the screen: a message of the studio may overwrite the echo area.
+  const emacsUntil = (form, pattern, label) => waitUntil(async () => {
+    await emacsEval(form);
+    await pause(400);
+    return pattern.test(await screen());
+  }, label, 30_000);
   await editFile("app.el", "(react-set-state self :count 0)", "(progn (function-that-is-not-there) (react-set-state self :count 0))");
   await screenUntil(/Warning: the function .function-that-is-not-there. is not known/, "the compiler's warning appears in Emacs");
   const warningScreen = await screen();
@@ -152,6 +159,55 @@ try {
   await screenUntil(/definition-react\.el-t/, "M-. goes to the definition in react.el");
   pass("Emacs completes, describes and finds the functions of elisp-react and of the server library");
 
+  // Diagnostics while typing: a change that is not saved is checked too.
+  await emacsEval(`(with-current-buffer "app.el"
+    (goto-char (point-max))
+    (insert "(defun unsaved-thing () (function-typed-just-now))")
+    (flymake-start)
+    (message "typing-%s-%s" (buffer-modified-p)
+             (mapcar (lambda (d) (list (flymake-diagnostic-type d)
+                                       (buffer-substring (flymake-diagnostic-beg d) (flymake-diagnostic-end d))))
+                     (flymake-diagnostics))))`);
+  await screenUntil(/typing-t-\(\(:warning function-typed-just-now\)\)/, "the unsaved text has its diagnostic, on the symbol");
+  assert.equal(await js("window.elispStudio.files.get('app.el').includes('function-typed-just-now')"), false);
+  await emacsEval('(with-current-buffer "app.el" (revert-buffer t t t) (flymake-start))');
+  await waitUntil(async () => {
+    await emacsEval('(with-current-buffer "app.el" (message "reverted-%s-%d" (buffer-modified-p) (length (flymake-diagnostics))))');
+    await pause(300);
+    return /reverted-nil-0/.test(await screen());
+  }, "no diagnostics after the text is taken back", 30_000);
+  pass("Flymake checks the buffer as it is typed: this Emacs compiles the text without saving or running it");
+
+  // The project's own definitions are known to Emacs once they are saved.
+  await emacsEval(`(with-current-buffer "app.el"
+    (goto-char (point-max))
+    (insert "\n(defun my-own-helper (count step)\n  \\"The count after one more STEP.\\"\n  (+ count step))\n\n(defvar my-own-setting 5 \\"How far a click goes.\\")\n")
+    (save-buffer))`);
+  await until("/app\\.el updated/.test(document.querySelector('#status').textContent)", "the file with the helper is applied");
+  await emacsUntil(`(with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(my-own-h")
+    (completion-at-point)
+    (message "own-%s-%S-%s-%s" (buffer-string) (help-function-arglist 'my-own-helper t)
+             (documentation-property 'my-own-setting 'variable-documentation)
+             (symbol-value 'my-own-setting)))`,
+    /own-\(my-own-helper-\(count step\)-How far a click goes\.-nil/,
+    "the helper completes and has its arguments; the variable is declared but has no value here");
+  await emacsUntil(`(progn
+    (xref-find-definitions "my-own-helper")
+    (let ((found (format "own-definition-%s-%s" (buffer-name)
+                         (and (save-excursion (search-forward "(defun my-own-helper" (line-end-position) t)) t))))
+      (switch-to-buffer "app.el")
+      (message "%s" found)))`, /own-definition-app\.el-t/, "M-. goes to the helper in app.el");
+  // Using it draws no "not known to be defined".
+  await editFile("app.el", "(+ 10 (react-state self :count))", "(my-own-helper (react-state self :count) 10)");
+  await appUntil("true", "the application is there");
+  await emacsUntil('(with-current-buffer "app.el" (flymake-start) (message "own-use-%d" (length (flymake-diagnostics))))',
+    /own-use-0/, "no diagnostics for a call of the project's own function");
+  await app("(document.querySelector('.increment').click(), true)");
+  await appUntil("document.querySelector('.count').textContent === 'Clicks so far: 24'", "the helper runs in the application");
+  pass("Emacs knows the project's own functions and variables after a save (completion, arguments, M-.), without running the project");
+
   await editFile("app.el", '(h1 "Fixed")', '(h1 "Fixed"');
   await screenUntil(/End of file during parsing/, "a syntax error appears in Emacs");
   assert.equal(await app("document.querySelector('h1').textContent"), "Fixed");
@@ -168,7 +224,7 @@ try {
     (message "modified-%s" (buffer-modified-p)))`);
   await appUntil("document.querySelector('h1').textContent === 'Not saved'", "the definition reaches the application");
   assert.match(await status(), /a definition of app\.el evaluated/);
-  assert.equal(await app("document.querySelector('.count').textContent"), "Clicks so far: 14");
+  assert.equal(await app("document.querySelector('.count').textContent"), "Clicks so far: 24");
   assert.equal(await js("window.elispStudio.files.get('app.el').includes('Not saved')"), false);
   await emacsEval('(with-current-buffer "app.el" (goto-char (point-min)) (search-forward "(h1 \\"Not saved\\")") (replace-match "(h1 \\"Fixed\\")" t t) (save-buffer))');
   await appUntil("document.querySelector('h1').textContent === 'Fixed'", "back to the saved text");
@@ -194,7 +250,7 @@ try {
   await send("second");
   await appUntil("document.querySelectorAll('.message').length === 3", "the changed server answers");
   assert.deepEqual(await messages(), ["Hello from the server's Emacs", "first", "SECOND"]);
-  assert.equal(await app("document.querySelector('.count').textContent"), "Clicks so far: 14");
+  assert.equal(await app("document.querySelector('.count').textContent"), "Clicks so far: 24");
   pass("a saved server.el takes effect at once; the server keeps its data, the application its state");
 
   await send("   ");

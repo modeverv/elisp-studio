@@ -16,17 +16,22 @@
 ;;   C-c C-p   publish: commit the project with git and push it
 ;;             (`elisp-studio-publish')
 ;;
-;; What the application's Emacs says about the code (compiler warnings,
-;; errors) is shown in the buffer *elisp-studio*, in `compilation-mode':
-;; RET or M-g n jumps to the place.  The same messages are Flymake
-;; diagnostics in the project's buffers: the places are marked, the mode
-;; line counts them, M-x flymake-goto-next-error walks through them.
+;; What the application's Emacs says about a saved file (compiler
+;; warnings, errors) is shown in the buffer *elisp-studio*, in
+;; `compilation-mode': RET or M-g n jumps to the place.
 ;;
-;; The libraries the project is written with (elisp-react's react.el,
-;; app-server.el) are loaded into this Emacs as well.  They do nothing here,
-;; but Emacs knows their functions: C-M-i completes their names, ElDoc
-;; shows their arguments, M-. goes to their definitions, C-h f describes
+;; While you type, the project's buffers are checked by Flymake: this Emacs
+;; byte-compiles the buffer's text (without saving or running it) a moment
+;; after each change, marks the places the compiler complains about and
+;; counts them in the mode line; M-x flymake-goto-next-error walks through
 ;; them.
+;;
+;; This Emacs knows the functions the project uses, without running the
+;; project: the libraries (elisp-react's react.el, app-server.el) are loaded
+;; here, where they do nothing, and the project's own definitions are taken
+;; from its files whenever one is saved (`elisp-studio-learn-file').  So
+;; C-M-i completes their names, ElDoc shows their arguments, M-. goes to
+;; their definitions and C-h f describes them.
 
 ;;; Code:
 
@@ -77,7 +82,6 @@ carries the decoded message."
   (let ((message (cadr event)))
     (pcase (plist-get message :type)
       ("log"
-       (elisp-studio--set-diagnostics (append (plist-get message :files) nil) (plist-get message :log))
        (elisp-studio--show-log (plist-get message :status)
                                (plist-get message :summary)
                                (plist-get message :log))))))
@@ -110,49 +114,112 @@ messages and errors with file names of this Emacs (or nil)."
                                (window-height . 8))))
     (message "%s" summary)))
 
-;;;; Diagnostics in the buffers (Flymake)
+;;;; Diagnostics while typing (Flymake)
 
 ;; Emacs's own Flymake backends for Emacs Lisp start a second Emacs, which
-;; this one cannot.  But the application's Emacs compiles every file that is
-;; saved, and its messages arrive here: they are the diagnostics.
+;; this one cannot.  This backend compiles in this Emacs: the buffer's text
+;; goes to a scratch file, `byte-compile-file' reads it, and what the
+;; compiler has to say is collected instead of logged.  Compiling does not
+;; run the program; it does expand its macros.
 
-(defvar elisp-studio--diagnostics (make-hash-table :test #'equal)
-  "File name -> list of (LINE COLUMN TYPE TEXT) from the last compilation.")
+(defconst elisp-studio--check-directory "/tmp/elisp-studio/check/")
 
-(defvar-local elisp-studio--flymake-report nil
-  "The function Flymake gave this buffer's backend to report with.")
-
-(defun elisp-studio--set-diagnostics (files log)
-  "Take the compiler's LOG as the diagnostics of FILES (absolute names).
-Files that LOG says nothing about have none."
-  (dolist (file files) (remhash file elisp-studio--diagnostics))
-  (let ((start 0))
-    (while (string-match "^\\(/[^:\n]+\\):\\([0-9]+\\):\\([0-9]+\\): \\(Warning\\|Error\\): \\(.*\\)$"
-                         (or log "") start)
-      (setq start (match-end 0))
-      (push (list (string-to-number (match-string 2 log)) (string-to-number (match-string 3 log))
-                  (if (equal (match-string 4 log) "Error") :error :warning)
-                  (match-string 5 log))
-            (gethash (match-string 1 log) elisp-studio--diagnostics))))
-  ;; Flymake takes a backend's word once per check: ask it to check again.
-  (dolist (buffer (buffer-list))
-    (with-current-buffer buffer
-      (when (and (bound-and-true-p flymake-mode) (member buffer-file-name files))
-        (flymake-start)))))
-
-(defun elisp-studio--flymake-publish ()
-  "Report this buffer's diagnostics to Flymake."
-  (funcall elisp-studio--flymake-report
-           (mapcar (lambda (entry)
-                     (let ((region (flymake-diag-region (current-buffer) (nth 0 entry) (nth 1 entry))))
-                       (flymake-make-diagnostic (current-buffer) (car region) (cdr region)
-                                                (nth 2 entry) (nth 3 entry))))
-                   (gethash buffer-file-name elisp-studio--diagnostics))))
+(defun elisp-studio--compiler-messages ()
+  "Byte-compile the current buffer's text; return what the compiler says.
+The value is a list of (POSITION LEVEL TEXT): a buffer position or nil,
+:warning or :error, and the message."
+  (let* ((file (expand-file-name (file-name-nondirectory (or buffer-file-name "buffer.el"))
+                                 elisp-studio--check-directory))
+         (text (buffer-substring-no-properties (point-min) (point-max)))
+         (found nil)
+         (byte-compile-log-warning-function
+          (lambda (string &optional position _fill level)
+            (push (list position (if (eq level :error) :error :warning) string) found)))
+         (byte-compile-dest-file-function (lambda (source) (concat source "c")))
+         (byte-compile-verbose nil)
+         (inhibit-message t)
+         (coding-system-for-write 'utf-8-unix))
+    (make-directory elisp-studio--check-directory t)
+    (write-region text nil file nil 'silent)
+    (condition-case err
+        (byte-compile-file file)
+      (error (push (list nil :error (error-message-string err)) found)))
+    (ignore-errors (delete-file file))
+    (ignore-errors (delete-file (concat file "c")))
+    (nreverse found)))
 
 (defun elisp-studio-flymake (report-function &rest _)
-  "A Flymake backend: what the application's Emacs said about this file."
-  (setq elisp-studio--flymake-report report-function)
-  (elisp-studio--flymake-publish))
+  "A Flymake backend: the byte compiler's opinion of this buffer as it is."
+  (funcall report-function
+           (mapcar (lambda (entry)
+                     (let* ((position (and (integerp (car entry))
+                                           (min (max (car entry) (point-min)) (point-max))))
+                            (bounds (and position
+                                         (save-excursion
+                                           (goto-char position)
+                                           (or (bounds-of-thing-at-point 'symbol)
+                                               (bounds-of-thing-at-point 'sexp)))))
+                            (beg (or (car bounds) position (point-min)))
+                            (end (or (cdr bounds) (min (1+ beg) (point-max)))))
+                       (flymake-make-diagnostic (current-buffer) beg end (nth 1 entry) (nth 2 entry))))
+                   (elisp-studio--compiler-messages))))
+
+;;;; The project's own definitions
+
+;; To complete a name, show a function's arguments or find its definition,
+;; Emacs has to have the function.  The project's files are not loaded here
+;; (they are the application's program, and this is the editor), but their
+;; definitions are taken out and made: functions and macros with their
+;; bodies, which nothing calls here; variables without their values.
+
+(defconst elisp-studio--function-definers
+  '(defun defmacro defsubst cl-defun cl-defmacro cl-defsubst define-inline cl-defgeneric))
+
+(defun elisp-studio--record (file definition)
+  "Note in `load-history' that FILE has DEFINITION, so that M-. finds it."
+  (let ((entry (assoc file load-history)))
+    (unless entry
+      (setq entry (list file))
+      (push entry load-history))
+    (unless (member definition (cdr entry))
+      (setcdr entry (cons definition (cdr entry))))))
+
+(defun elisp-studio-learn-file (file)
+  "Make the definitions of the Emacs Lisp FILE known to this Emacs.
+Top-level definitions of functions, macros, structures and errors are
+evaluated; variables are only declared.  Everything else in the file is
+left alone: nothing of the program runs.  Returns how many definitions
+were taken."
+  (let ((count 0))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (let (form)
+        (while (setq form (condition-case nil (read (current-buffer)) (error nil)))
+          (condition-case nil
+              (pcase form
+                (`(,(and definer (guard (memq definer elisp-studio--function-definers))) ,(and name (pred symbolp)) . ,_)
+                 (eval form t)
+                 (elisp-studio--record file (cons 'defun name))
+                 (setq count (1+ count)))
+                (`(,(or 'defvar 'defconst 'defcustom 'defvar-local) ,(and name (pred symbolp)) . ,rest)
+                 ;; Known as a variable, with its documentation, but the
+                 ;; initial value is the program's business.
+                 (unless (boundp name) (set name nil))
+                 (eval `(defvar ,name) t)
+                 (when (stringp (nth 1 rest)) (put name 'variable-documentation (nth 1 rest)))
+                 (elisp-studio--record file name)
+                 (setq count (1+ count)))
+                (`(,(or 'cl-defstruct 'define-error 'require) . ,_)
+                 (eval form t)))
+            (error nil)))))
+    count))
+
+(defun elisp-studio-learn-project ()
+  "Take the definitions of every Emacs Lisp file of the project."
+  (dolist (file (directory-files-recursively elisp-studio-project "\\.el\\'"))
+    (unless (string-match-p "/\\." (file-relative-name file elisp-studio-project))
+      (elisp-studio-learn-file file))))
 
 ;;;; The project's buffers
 
@@ -234,6 +301,7 @@ Without a remote the commit is made and the push is left out."
 
 (defun elisp-studio--saved ()
   "Tell the page that this file was saved (its text may be unchanged)."
+  (elisp-studio-learn-file buffer-file-name)
   (elisp-studio--send :type "saved"
                       :file (file-relative-name buffer-file-name elisp-studio-project)))
 
@@ -255,6 +323,7 @@ Without a remote the commit is made and the push is left out."
              (derived-mode-p 'emacs-lisp-mode))
     (elisp-studio-mode 1)))
 
+(elisp-studio-learn-project)
 (add-hook 'find-file-hook #'elisp-studio--maybe-enable)
 (dolist (buffer (buffer-list))
   (with-current-buffer buffer (elisp-studio--maybe-enable)))
