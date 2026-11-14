@@ -25,6 +25,7 @@ const TEMPLATE_FILES = ["index.html", "app.el", "style.css"];
 const TEMPLATE_OPTIONAL_FILES = ["server.el"];
 const SERVER_FILE = "server.el";
 const SERVER_DATA_KEY = "server-data";
+const DEFERRED_TIMEOUT_MS = 30000;   // as app-server-deferred-timeout
 const SERVER_TIMEOUT_MS = 8000;
 const LOAD_TIMEOUT_MS = 8000;
 // Starting the application: the first time Emacs may have to be downloaded
@@ -173,9 +174,9 @@ async function startServer(source) {
   serverLibrary ??= await (await fetch(new URL("lisp/app-server.el", here), { cache: "no-store" })).text();
   const emacs = createEmacsEvalService({ onOutput: (text) => console.log(`[server] ${text.trimEnd()}`) });
   await withTimeout(emacs.ready, FIRST_START_TIMEOUT_MS, "the server's Emacs");
-  await emacs.eval(`${serverLibrary}\nnil`);
+  await emacs.eval(`${serverLibrary}\n(app-server-use-tab-host)\nnil`);
   await emacs.call("app-server--restore", await loadServerData());
-  server = { emacs, source: null, signature: await emacs.call("app-server--signature") };
+  server = { emacs, source: null, signature: await emacs.call("app-server--signature"), deferred: new Map() };
   await loadServer(source);
 }
 
@@ -213,6 +214,48 @@ async function syncServer(project) {
   }
 }
 
+// Keep what the server keeps, when a request changed it.
+async function keepServerData(current) {
+  const signature = await current.emacs.call("app-server--signature");
+  if (signature !== current.signature) {
+    current.signature = signature;
+    await saveServerData(await current.emacs.call("app-server--dump"));
+  }
+}
+
+// The server's Emacs runs only while it answers a call, so this page waits
+// in its place.  EVENTS is what a call left behind: answers of deferred
+// requests that are complete now, and work the server asks for
+// (app-server-after, app-server-fetch), which is reported back when done.
+function serverEvents(current, events) {
+  for (const [id, status, text] of events.finished || []) {
+    current.deferred.get(id)?.([status, text]);
+    current.deferred.delete(id);
+  }
+  for (const [id, command, argument] of events.commands || []) {
+    const done = async (ok, value) => {
+      if (server !== current) return;
+      try {
+        serverEvents(current, await withTimeout(
+          current.emacs.call("app-server-tab-report", id, ok, value), SERVER_TIMEOUT_MS, "the server"));
+        await keepServerData(current);
+      } catch (error) {
+        report("error", `server.el: ${error.message}`);
+      }
+    };
+    if (command === "timeout") {
+      setTimeout(() => done(true, null), argument);
+    } else if (command === "fetch") {
+      fetch(argument.url, {
+        method: argument.method,
+        headers: argument.headers || undefined,
+        body: argument.body ?? undefined,
+      }).then(async (response) => done(true, { status: response.status, ok: response.ok, text: await response.text() }),
+              (error) => done(false, String(error.message || error)));
+    }
+  }
+}
+
 // The fetch of the application: /api/... goes to the server's Emacs.
 async function applicationFetch(url, options = {}) {
   const target = new URL(url, "http://application.invalid/");
@@ -225,15 +268,19 @@ async function applicationFetch(url, options = {}) {
   if (!server) return lisp(404, '"This application has no server.el"');
   try {
     const current = server;
-    const [status, text] = await withTimeout(
-      current.emacs.call("app-server-respond", options.method || "GET", target.pathname + target.search, options.body ?? ""),
+    const result = await withTimeout(
+      current.emacs.call("app-server-tab-request", options.method || "GET", target.pathname + target.search, options.body ?? ""),
       SERVER_TIMEOUT_MS, "the server");
-    // Keep what the server keeps, when the request changed it.
-    const signature = await current.emacs.call("app-server--signature");
-    if (signature !== current.signature) {
-      current.signature = signature;
-      await saveServerData(await current.emacs.call("app-server--dump"));
-    }
+    // An answer that comes later (app-server-defer) arrives with the
+    // events of some later call.
+    const later = result.answer ? null : new Promise((resolve) => {
+      current.deferred.set(result.pending, resolve);
+      setTimeout(() => resolve([504, '"The server did not answer in time"']), DEFERRED_TIMEOUT_MS);
+    });
+    serverEvents(current, result);
+    await keepServerData(current);
+    const [status, text] = result.answer || await later;
+    current.deferred.delete(result.pending);
     return lisp(status, text);
   } catch (error) {
     if (/did not answer/.test(error.message)) {
@@ -537,6 +584,7 @@ document.querySelector("#restart").addEventListener("click", () => {
 
 // For tests and the console.
 window.elispStudio = {
+  fetch: applicationFetch,
   get preview() { return preview; },
   get files() { return files; },
   get server() { return server; },

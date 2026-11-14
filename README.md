@@ -106,6 +106,31 @@ The same project runs for real under a native Emacs, which then is the web serve
 
 It serves the project's files and answers `/api/...` with the same `server.el`; what the server keeps goes to `.data/` in the project. The page's Emacs Lisp still runs in the visitor's browser.
 
+### Answering later
+
+A handler that has to wait for something need not make every other request wait with it. It returns `app-server-defer`; the request stays open, the server goes on, and the answer is sent when `respond` is called:
+
+```elisp
+('("GET" "/api/rates")
+ (app-server-defer
+  (lambda (respond fail)
+    (app-server-fetch "https://example.com/rates.json"
+                      :then (lambda (response)
+                              (if (plist-get response :ok)
+                                  (funcall respond (plist-get response :text))
+                                (funcall fail "The rates are not available")))))))
+```
+
+There are three things to wait for, none of which blocks:
+
+- `(app-server-fetch URL :method :headers :body :then :catch)`: an HTTP request to another server.
+- `(app-server-after SECONDS FUNCTION)`: a moment.
+- `(app-server-run '("program" "argument") :input STRING :then FUNCTION)`: a program, a second Emacs for long computations for instance. The function gets `(:status 0 :output "...")`. No shell reads the command.
+
+`(funcall fail MESSAGE [STATUS])` refuses the request, an error in a function that runs later does the same, and a request that is not answered within `app-server-deferred-timeout` (30 seconds) gets a 504. The same `server.el` works in the studio, where the page keeps the time and makes the requests for the server's Emacs (so the browser's rules for requests to other sites apply there); programs exist only under a native Emacs.
+
+Computing is not waiting: Emacs Lisp that runs, and SQLite, still hold the one thread. That is what `app-server-run` is for.
+
 ### How fast is that server?
 
 It is one Emacs with one thread, working like Node.js: connections wait in the operating system, Emacs takes one request, runs the handler to its end, answers, takes the next. `server.el` is byte-compiled when the server starts. Measured with ApacheBench on an Apple M4 Max, Emacs 31.1, 10 connections at a time (`ab -n 5000 -c 10`):
@@ -120,7 +145,27 @@ It is one Emacs with one thread, working like Node.js: connections wait in the o
 | an SQLite `INSERT` (written to disk) | 2,590 |
 | a static file | 2,750 |
 
-With one connection at a time it is 6,700 per second (ApacheBench opens a new connection for each request), with 100 at a time 17,000. A handler that takes long holds up everyone behind it, as in any single-threaded event loop; there is no way yet to answer later (to wait for something without blocking). More than about a hundred connections arriving in the same instant exceed the queue the operating system keeps for the server.
+With one connection at a time it is 6,700 per second (ApacheBench opens a new connection for each request), with 100 at a time 17,000. More than about a hundred connections arriving in the same instant exceed the queue the operating system keeps for the server.
+
+A handler that takes long holds up everyone behind it, as in any single-threaded event loop, unless it answers later. Handlers that need 100 ms of something else, measured the same way:
+
+| Handler | 10 at a time | 50 | 100 |
+|---|---|---|---|
+| runs a program and waits for it (`call-process`) | 9 per second | 9 (half wait over 3 s) | |
+| runs it with `app-server-run`, answers later | 84 | 431 | 834 |
+| waits inside Emacs (`sleep-for`) | 89 | | 97% turned away (503) |
+| `app-server-after`, answers later | 90 | | 869 |
+| asks another server and waits (`url-retrieve-synchronously`) | 81 | | 98% turned away (503) |
+| `app-server-fetch`, answers later | 91 | | 904 |
+
+Answered later, the rate is simply connections ÷ 0.1 s: nobody waits for anybody. What the other requests see, the plain handler of the first table while 50 connections keep asking for the program:
+
+| Meanwhile | The plain handler | Slowest request |
+|---|---|---|
+| the program is waited for | 184 per second | 5.4 s |
+| the program is run with `app-server-run` | 8,480 per second | 15 ms |
+
+Deferring itself costs little: a handler that defers and answers at once does 9,600 per second (15,000 without). The waits inside Emacs deserve a note: `sleep-for` and `url-retrieve-synchronously` let the next request in while they wait, which then runs *inside* the waiting one. Ten of those are fine; a hundred used to exhaust the stack and end the server, so beyond 32 it now turns requests away with a 503.
 
 ## Getting the project out
 

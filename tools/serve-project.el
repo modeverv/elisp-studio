@@ -30,6 +30,14 @@
 (defvar serve-project-port 8018)
 (defvar serve-project--process nil)
 
+;; A handler that waits inside Emacs (`sleep-for', `url-retrieve-synchronously')
+;; lets the next request in while it waits: that one runs inside the first,
+;; and the first cannot finish before it.  Enough of them exhaust the
+;; stack, so beyond this depth requests are turned away (503).  A handler
+;; that has to wait should answer later instead: `app-server-defer'.
+(defvar serve-project-max-nesting 32)
+(defvar serve-project--nesting 0)
+
 ;; app-server.el: next to this file (a downloaded project), or in lisp/ of
 ;; the elisp-studio repository.
 (let ((here (file-name-directory (or load-file-name buffer-file-name))))
@@ -57,12 +65,14 @@
          file)))
 
 (defun serve-project--respond (process status type body)
-  (process-send-string
-   process
-   (concat (format "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
-                   status type (string-bytes body))
-           body))
-  (delete-process process))
+  ;; An answer that comes later may find that the visitor has left.
+  (when (process-live-p process)
+    (process-send-string
+     process
+     (concat (format "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+                     status type (string-bytes body))
+             body))
+    (delete-process process)))
 
 (defun serve-project--vendored-p ()
   "Non-nil if the project has its own copy of the browser's Emacs."
@@ -78,7 +88,15 @@
                        t t html)
       html)))
 
-(defconst serve-project--reasons '((200 . "OK") (400 . "Bad Request") (404 . "Not Found")))
+(defconst serve-project--reasons
+  '((200 . "OK") (400 . "Bad Request") (404 . "Not Found") (500 . "Internal Server Error")
+    (504 . "Gateway Timeout")))
+
+(defun serve-project--answer (process status text)
+  "Send the answer of server.el: STATUS and TEXT, printed Lisp data."
+  (serve-project--respond process (format "%d %s" status (or (cdr (assq status serve-project--reasons)) "Error"))
+                          "application/x-emacs-lisp; charset=utf-8"
+                          (encode-coding-string text 'utf-8)))
 
 (defun serve-project--handle (process method target headers body)
   (let ((path (car (split-string target "?")))
@@ -90,11 +108,11 @@
                                                 (format "http://localhost:%d" serve-project-port)))))
           (serve-project--respond process "403 Forbidden" "application/x-emacs-lisp; charset=utf-8"
                                   "\"requests from other sites are refused\"")
-        (let ((answer (app-server-respond method target (decode-coding-string body 'utf-8))))
-          (serve-project--respond
-           process (format "%d %s" (aref answer 0) (cdr (assq (aref answer 0) serve-project--reasons)))
-           "application/x-emacs-lisp; charset=utf-8"
-           (encode-coding-string (aref answer 1) 'utf-8)))))
+        ;; A handler may answer later (`app-server-defer'): then there is no
+        ;; answer yet, the connection stays open and this server goes on.
+        (let ((answer (app-server-respond method target (decode-coding-string body 'utf-8)
+                                          (lambda (status text) (serve-project--answer process status text)))))
+          (when answer (serve-project--answer process (aref answer 0) (aref answer 1))))))
      ((not (member method '("GET" "HEAD")))
       (serve-project--respond process "405 Method Not Allowed" "text/plain" "method not allowed"))
      (t
@@ -129,10 +147,16 @@
              (body (substring input (+ end 4))))
         (cond ((> length 65536)
                (serve-project--respond process "413 Content Too Large" "text/plain" "too large"))
-              ((>= (string-bytes body) length)
+              ((< (string-bytes body) length))   ; more to come
+              ((process-get process :handled))   ; being answered
+              ((>= serve-project--nesting serve-project-max-nesting)
+               (serve-project--respond process "503 Service Unavailable" "text/plain" "busy"))
+              (t
+               (process-put process :handled t)
                (condition-case err
-                   (serve-project--handle process (nth 0 request) (or (nth 1 request) "/") headers
-                                          (substring body 0 length))
+                   (let ((serve-project--nesting (1+ serve-project--nesting)))
+                     (serve-project--handle process (nth 0 request) (or (nth 1 request) "/") headers
+                                            (substring body 0 length)))
                  (error
                   (message "serve-project: %s" (error-message-string err))
                   (ignore-errors
@@ -166,7 +190,12 @@
 (defun serve-project-run ()
   "Start the server and serve until Emacs is killed (for batch mode)."
   (serve-project-start)
-  (while t (accept-process-output nil 1)))
+  (while t
+    ;; An error in a handler that ran later (a timer, a sentinel) must not
+    ;; end the server.
+    (condition-case err
+        (accept-process-output nil 1)
+      (error (message "serve-project: %s" (error-message-string err))))))
 
 (provide 'serve-project)
 ;;; serve-project.el ends here

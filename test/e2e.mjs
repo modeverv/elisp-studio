@@ -258,6 +258,32 @@ try {
   assert.equal((await messages()).length, 3);
   pass("an error signalled in server.el reaches the page as the response");
 
+  // Answering later: the server's Emacs runs only during a call, so the
+  // page keeps the time and makes the server's own requests.
+  await editFile("server.el", "(_ (signal 'file-missing", `('("GET" "/api/later")
+     (app-server-defer (lambda (respond _fail) (app-server-after 0.3 (lambda () (funcall respond "later"))))))
+    ('("GET" "/api/elsewhere")
+     (let ((url (app-server-parameter "url")))
+       (app-server-defer (lambda (respond _fail)
+         (app-server-fetch url :then (lambda (response) (funcall respond (list (plist-get response :status) (length (plist-get response :text))))))))))
+    ('("GET" "/api/broken")
+     (app-server-defer (lambda (_respond _fail) (app-server-after 0.05 (lambda () (error "Broke later"))))))
+    (_ (signal 'file-missing`);
+  await until("window.elispStudio.server?.source?.includes('/api/later')", "the deferring server.el is applied");
+  const viaServer = (path) => js(`(async () => {
+    const started = performance.now();
+    const response = await window.elispStudio.fetch(${JSON.stringify(path)});
+    return [response.status, await response.text(), performance.now() - started];
+  })()`);
+  const [[laterStatus, laterText, laterMs], [quickStatus, , quickMs]] = await Promise.all([viaServer("/api/later"), viaServer("/api/messages")]);
+  assert.deepEqual([laterStatus, laterText, quickStatus], [200, '"later"', 200]);
+  assert.ok(laterMs >= 280 && quickMs < laterMs, `a waiting request does not hold up another (${Math.round(laterMs)} ms, ${Math.round(quickMs)} ms)`);
+  const elsewhere = await js("new URL('js/tar.js', location.href).href");
+  const tarLength = (await (await fetch(elsewhere)).text()).length;
+  assert.deepEqual((await viaServer(`/api/elsewhere?url=${encodeURIComponent(elsewhere)}`)).slice(0, 2), [200, `(200 ${tarLength})`]);
+  assert.deepEqual((await viaServer("/api/broken")).slice(0, 2), [400, '"Broke later"']);
+  pass("a handler can answer later: after a moment, after a request of its own; an error later is the response");
+
   // Publishing: the project as a ZIP, and with git from inside Emacs.
   const zipNames = await js(`(async () => {
     const zip = await window.elispStudio.zip();

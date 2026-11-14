@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -72,6 +73,80 @@ test("the template project runs under a native Emacs: files, server.el, kept dat
     assert.deepEqual(await text("/api/messages"), [200, '("Hello from the server\'s Emacs" "from a real request")']);
   } finally {
     await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a handler can answer later, and the server goes on meanwhile", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "elisp-studio-later-"));
+  await cp(join(root, "template"), directory, { recursive: true });
+  // A service that takes its time, for the server to ask.
+  const slow = createHttpServer((request, response) => setTimeout(() => response.end("slow answer"), 300));
+  await new Promise((resolve) => slow.listen(0, "127.0.0.1", resolve));
+  await writeFile(join(directory, "server.el"), `;;; -*- lexical-binding: t; -*-
+(defun app-server-handle (method path body)
+  (pcase (list method path)
+    ('("GET" "/api/quick") "quick")
+    ('("GET" "/api/later")
+     (app-server-defer (lambda (respond _fail) (app-server-after 0.3 (lambda () (funcall respond "later"))))))
+    ('("GET" "/api/at-once") (app-server-defer (lambda (respond _fail) (funcall respond "at once") (funcall respond "twice"))))
+    ('("GET" "/api/elsewhere")
+     (app-server-defer
+      (lambda (respond _fail)
+        (app-server-fetch "http://127.0.0.1:${slow.address().port}/"
+                          :then (lambda (response) (funcall respond (list (plist-get response :status) (plist-get response :text))))))))
+    ('("GET" "/api/nowhere")
+     (app-server-defer (lambda (respond _fail) (app-server-fetch "http://127.0.0.1:1/" :then respond))))
+    ('("POST" "/api/program")
+     (app-server-defer
+      (lambda (respond _fail)
+        (app-server-run '("tr" "a-z" "A-Z") :input body :then respond))))
+    ('("GET" "/api/refused") (app-server-defer (lambda (_respond fail) (app-server-after 0.05 (lambda () (funcall fail "Not for you" 404))))))
+    ('("GET" "/api/broken") (app-server-defer (lambda (_respond _fail) (app-server-after 0.05 (lambda () (error "Broke later"))))))
+    ('("GET" "/api/broken-now") (app-server-defer (lambda (_respond _fail) (error "Broke at once"))))
+    ('("GET" "/api/never") (app-server-defer #'ignore))
+    ('("GET" "/api/nested") (sleep-for 0.3) "nested")
+    (_ (signal 'file-missing (list "No such API" path)))))
+(setq app-server-deferred-timeout 1)
+`);
+  const server = await startServer(directory);
+  try {
+    const text = async (path, options) => {
+      const started = performance.now();
+      const response = await fetch(`${server.origin}${path}`, options);
+      return [response.status, await response.text(), performance.now() - started];
+    };
+    const answer = async (path, options) => (await text(path, options)).slice(0, 2);
+    assert.deepEqual(await answer("/api/later"), [200, '"later"']);
+    assert.deepEqual(await answer("/api/at-once"), [200, '"at once"']);
+    assert.deepEqual(await answer("/api/elsewhere"), [200, '(200 "slow answer")']);
+    assert.equal((await answer("/api/nowhere"))[0], 400);
+    assert.deepEqual(await answer("/api/program", { method: "POST", body: "shout" }), [200, '(:status 0 :output "SHOUT")']);
+    assert.deepEqual(await answer("/api/refused"), [404, '"Not for you"']);
+    assert.deepEqual(await answer("/api/broken"), [400, '"Broke later"']);
+    assert.deepEqual(await answer("/api/broken-now"), [400, '"Broke at once"']);
+    assert.deepEqual(await answer("/api/never"), [504, '"The server did not answer in time"']);
+
+    // Fifty requests that each wait 300 ms take about 300 ms together, and
+    // a quick request among them is not held up.
+    const started = performance.now();
+    const [quick, ...waiting] = await Promise.all([
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => text("/api/quick")),
+      ...Array.from({ length: 50 }, () => text("/api/later")),
+    ]);
+    const elapsed = performance.now() - started;
+    assert.deepEqual([...new Set(waiting.map(([status, body]) => `${status} ${body}`))], ['200 "later"']);
+    assert.ok(elapsed < 1500, `fifty waits overlap (${Math.round(elapsed)} ms)`);
+    assert.ok(quick[2] < 250, `a quick request is answered while the others wait (${Math.round(quick[2])} ms)`);
+
+    // Handlers that wait inside Emacs run inside one another; beyond a
+    // depth the server turns requests away instead of falling over.
+    const nested = await Promise.all(Array.from({ length: 80 }, () => answer("/api/nested").catch(() => [0, ""])));
+    assert.ok(nested.some(([status]) => status === 200) && nested.some(([status]) => status === 503), "200s and 503s");
+    assert.deepEqual(await answer("/api/quick"), [200, '"quick"']);
+  } finally {
+    await server.stop();
+    slow.close();
     await rm(directory, { recursive: true, force: true });
   }
 });

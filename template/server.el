@@ -8,6 +8,8 @@
 ;; native Emacs as a real web server: tools/serve-project.sh in elisp-studio.
 ;;
 ;; `app-server-read' and `app-server-write' keep Lisp data between requests.
+;; A handler that has to wait for something (another server, a program)
+;; returns `app-server-defer' and answers later; see the README.
 
 (defun app-messages ()
   "The messages the server keeps."

@@ -81,6 +81,17 @@ The definition at point goes to the application as text and is evaluated there (
 - In the studio, a third eval service worker. The studio gives the application a `fetch` (elisp-react's `start({ fetch })`) that hands requests for `/api/...` to `app-server-respond` and builds the `Response`; everything else goes to the network. The server's data directory is in that Emacs's memory. After each request the studio asks for a signature of its files (names, sizes, times); when it changed, it takes the files (`app-server--dump`, base64) and puts them into IndexedDB; a new server gets them back before `server.el` is loaded (`app-server--restore`). A request that does not return within eight seconds ends that Emacs and starts another.
 - `tools/serve-project.el`, a small HTTP server in Emacs Lisp for a native Emacs: files from the project directory, `/api/...` through `app-server-respond`, data in `.data/`.
 
+### Answering later
+
+`app-server-handle` may return the value of `app-server-defer`. `app-server-respond` then calls the deferred function with `respond` and `fail`, returns nil instead of `[STATUS TEXT]`, and delivers the answer to the function its caller passed (`later`) when one of the two is called; the first call counts. `app-server--guard` wraps every function that runs later so that an error fails the request it belongs to.
+
+What can be waited for is behind three variables, because the hosts differ:
+
+- `tools/serve-project.el` keeps the connection open and sends the response from `later`. Timers (`run-at-time`), url.el (`url-retrieve`) and `make-process` do the waiting; a timer answers 504 after `app-server-deferred-timeout`.
+- The Emacs in the tab runs only while it answers a call of the page, so it has no timers and no network. `app-server-use-tab-host` makes `app-server-after` and `app-server-fetch` queue commands instead. The studio calls `app-server-tab-request`, which returns the answer or a pending id, along with the commands; the page runs them (`setTimeout`, `fetch`), reports each result with `app-server-tab-report`, and every such call returns the deferred answers that are complete by then. `app-server-run` fails there.
+
+Emacs's own waits (`sleep-for`, `accept-process-output`, `url-retrieve-synchronously`) run other process filters while they wait, so a handler that uses them is re-entered by the next request. `serve-project.el` counts that nesting and answers 503 beyond 32, because a hundred nested handlers exhausted the stack and ended the server.
+
 ### SQLite
 
 `app-server-database` opens `NAME.db` in the data directory with Emacs's `sqlite-open` and keeps the connection. That is all there is to it on both hosts: natively the file is on disk; in the tab it is in the in-memory filesystem and is persisted as described above (a 12 KB database is 16 KB of base64 per changing request, so this is for small data). wasmacs links SQLite into the browser's Emacs without the write-ahead log, so a database is one file plus a transient `-journal`, which the dump leaves out.
