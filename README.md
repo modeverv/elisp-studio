@@ -103,7 +103,7 @@ The server can keep data in two ways:
 
 [`examples/sqlite`](examples/sqlite) is a reading list kept that way ([try it](https://modeverv.github.io/elisp-studio/?example=sqlite)). In the studio the database is a file in the memory of the server's Emacs, which the studio keeps in the browser (IndexedDB) between visits; under a native Emacs it is the file `.data/app.db`, which the `sqlite3` command line tool can open too.
 
-About bundling SQLite: it is in the [public domain](https://www.sqlite.org/copyright.html), so there are no conditions on shipping it. The Emacs that runs in the browser has it linked in by wasmacs (see "Bundled software and licences" there); a native Emacs has it if it was built with SQLite, which the usual packages are (`(sqlite-available-p)` tells). Nothing of SQLite is in this repository or in a downloaded project.
+About bundling SQLite: it is in the [public domain](https://www.sqlite.org/copyright.html), so there are no conditions on shipping it. The Emacs that runs in the browser has it linked in by wasmacs (see "Licence" there); a native Emacs has it if it was built with SQLite, which the usual packages are (`(sqlite-available-p)` tells). Nothing of SQLite is in this repository or in a downloaded project.
 
 In the studio the server is a third Emacs in the browser tab. The application's requests to `/api/...` never leave the tab: the studio hands them to that Emacs. Saving `server.el` changes the running server.
 
@@ -320,7 +320,7 @@ Deferring itself costs nothing to speak of: a handler that defers and answers at
   run.sh              ./run.sh [PORT]: Emacs becomes the web server of this directory
   fetch-emacs.sh      optional: download the browser's Emacs into vendor/ (about 160 MB, needs curl)
   backup.sh           copy what the server keeps (.data/) while it runs
-  server/             what run.sh loads into Emacs (the HTTP server and app-server.el)
+  server/             what run.sh loads into Emacs (the HTTP server and app-server.el, with their LICENSE)
   README.txt
   ```
 
@@ -371,3 +371,16 @@ node tools/record-demo.mjs   # record the pictures of this README again (needs f
 - The server in the tab keeps its data directory in memory and the studio copies it to IndexedDB after a request that changed it: fine for a small database, not for a large one.
 - `run.sh` listens on 127.0.0.1; publishing it, and using more than one core, takes a reverse proxy in front ("Publishing it" above says what is and is not there).
 - In the studio's tab scrypt hashes cannot be made or checked, an uploaded file is 32 MB at most, and cookies last until the studio is reloaded: it is the place to write the application, not to run it for others.
+
+## Licence
+
+MIT ([LICENSE](LICENSE)): keep the notice, and do what you want. That covers the studio and the project server (`lisp/app-server.el`, `tools/serve-project.el`).
+
+What becomes part of your application asks for nothing at all ([0BSD](template/LICENSE)): the template, the examples, and the files a downloaded project gets from `tools/project/` (`run.sh`, `fetch-emacs.sh`, `backup.sh`, the deploy configurations, `README.txt`). A downloaded project carries one notice, `server/LICENSE`, for the two server files in `server/`.
+
+The rest follows from Emacs being under the GNU GPL, version 3 or later:
+
+- **Why MIT fits.** The server files and the template are Emacs Lisp and run inside GNU Emacs. The GPL asks that [code combined with a GPL program](https://www.gnu.org/licenses/gpl-faq.html#GPLAndPlugins) be under a GPL-compatible licence; MIT is one (the FSF lists it as the [Expat licence](https://www.gnu.org/licenses/license-list.html#Expat)), and so is 0BSD.
+- **Nothing of Emacs is in this repository or in a downloaded project.** The browser's Emacs comes from the [wasmacs](https://github.com/modeverv/wasmacs) site, and the server's Emacs is the one installed on the machine.
+- **`./fetch-emacs.sh` changes that**: it copies the browser's Emacs into `vendor/`, and a site that serves `vendor/` distributes GNU Emacs under the GPL. The script brings what the GPL asks for, `vendor/wasmacs/licenses/`: the licence texts, and a `NOTICE.txt` that says where the exact source of that build is. Keep the directory with the copy.
+- **Your own files.** `app.el` runs inside Emacs, uses its Lisp libraries, and is sent to every visitor. By the FSF's reading of the GPL, [such a program](https://www.gnu.org/licenses/gpl-faq.html#IfInterpreterIsGPL) is to be published under a GPL-compatible licence: MIT, 0BSD and the GPL itself all fit. `server.el` stays on your server; what is not handed to anyone has no such condition.

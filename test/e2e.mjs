@@ -336,7 +336,7 @@ try {
   const zipNames = await js(`(async () => {
     const zip = await window.elispStudio.zip();
     const text = new TextDecoder("latin1").decode(zip);
-    const names = ["index.html", "app.el", "style.css", "server.el", "run.sh", "fetch-emacs.sh", "backup.sh", "server/serve-project.el", "server/app-server.el", "README.txt",
+    const names = ["index.html", "app.el", "style.css", "server.el", "run.sh", "fetch-emacs.sh", "backup.sh", "server/serve-project.el", "server/app-server.el", "server/LICENSE", "README.txt",
       "server/deploy/Caddyfile", "server/deploy/nginx.conf", "server/deploy/app.service"];
     return { magic: text.slice(0, 2), missing: names.filter((name) => !text.includes(name)), git: text.includes(".git/") };
   })()`);

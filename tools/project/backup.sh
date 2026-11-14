@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: 0BSD  (yours to change; no conditions)
 # Copy what this application keeps (.data/) to a place of its own, while
 # the server runs.
 #

@@ -1,6 +1,7 @@
 {
   "name": "elisp-studio",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Write a web application in Emacs Lisp in the browser and watch it change without a reload",
   "scripts": {

@@ -842,7 +842,8 @@ test("a downloaded project runs itself: run.sh, and with vendor/ its own copy of
   await cp(join(root, "template"), directory, { recursive: true });
   await mkdir(join(directory, "server"));
   for (const [path, source] of [["run.sh", "tools/project/run.sh"], ["fetch-emacs.sh", "tools/project/fetch-emacs.sh"],
-                                ["server/serve-project.el", "tools/serve-project.el"], ["server/app-server.el", "lisp/app-server.el"]]) {
+                                ["server/serve-project.el", "tools/serve-project.el"], ["server/app-server.el", "lisp/app-server.el"],
+                                ["server/LICENSE", "LICENSE"]]) {
     await cp(join(root, source), join(directory, path));
   }
   await cp(join(root, "tools/project/deploy"), join(directory, "server/deploy"), { recursive: true });
@@ -866,6 +867,9 @@ test("a downloaded project runs itself: run.sh, and with vendor/ its own copy of
     assert.equal((await fetch(`${server.origin}/server/serve-project.el`)).status, 404);
     assert.equal((await fetch(`${server.origin}/server.el`)).status, 404);
     assert.equal((await fetch(`${server.origin}/server/deploy/Caddyfile`)).status, 404);
+    // The licence of the two server files comes along (MIT asks for that).
+    assert.match(await readFile(join(directory, "server/LICENSE"), "utf8"), /^MIT License/);
+    assert.match(await readFile(join(directory, "server/app-server.el"), "utf8"), /SPDX-License-Identifier: MIT/);
     await server.stop();
 
     // With a copy in vendor/ (what fetch-emacs.sh makes) the page is told to use it.
@@ -884,3 +888,56 @@ test("a downloaded project runs itself: run.sh, and with vendor/ its own copy of
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("fetch-emacs.sh brings the licences of the Emacs it copies", async () => {
+  // Stand-ins for the two published sites, with small files.
+  const site = await mkdtemp(join(tmpdir(), "elisp-studio-site-"));
+  const directory = await mkdtemp(join(tmpdir(), "elisp-studio-fetch-"));
+  const emacs = "wasmacs/artifacts/emacs-browser-atomics-pdump";
+  const files = {
+    "elisp-react/js/elisp-react.js": "// elisp-react\n", "elisp-react/lisp/react.el": ";; react\n", "elisp-react/LICENSE": "MIT License\n",
+    "wasmacs/app/eval-build-id.json": "{}", "wasmacs/app/src/emacs-eval-client.js": "// client\n",
+    "wasmacs/app/src/emacs-eval-worker.js": "// worker\n", "wasmacs/app/src/emacs-eval-core.js": "// core\n",
+    "wasmacs/app/src/wasmacs-eval-service.el": ";; service\n",
+    [`${emacs}/temacs.js`]: "// temacs\n", [`${emacs}/temacs.wasm`]: "wasm", [`${emacs}/bootstrap-emacs.pdmp`]: "pdmp",
+    [`${emacs}/temacs.data.parts/manifest.json`]: JSON.stringify({ parts: [{ name: "part-000" }] }, null, 2),
+    [`${emacs}/temacs.data.parts/part-000`]: "data",
+    "wasmacs/licenses/files.txt": "NOTICE.txt\nGPL-3.0-or-later.txt\n",
+    "wasmacs/licenses/NOTICE.txt": "where the source is\n",
+    "wasmacs/licenses/GPL-3.0-or-later.txt": "GNU GENERAL PUBLIC LICENSE\n",
+  };
+  for (const [path, content] of Object.entries(files)) {
+    await mkdir(join(site, path, ".."), { recursive: true });
+    await writeFile(join(site, path), content);
+  }
+  const web = createHttpServer(async (request, response) => {
+    try { response.end(await readFile(join(site, new URL(request.url, "http://site").pathname))); }
+    catch (error) { response.writeHead(404).end(); }
+  });
+  await new Promise((resolve) => web.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${web.address().port}`;
+  try {
+    await cp(join(root, "tools/project/fetch-emacs.sh"), join(directory, "fetch-emacs.sh"));
+    // The script downloads from a server in this process: it must not block it.
+    const script = () => new Promise((resolve) => {
+      const child = spawn(join(directory, "fetch-emacs.sh"), [], { stdio: "ignore", env: {
+        ...process.env, WASMACS_URL: `${base}/wasmacs/`, ELISP_REACT_URL: `${base}/elisp-react/` } });
+      child.once("exit", resolve);
+    });
+    assert.equal(await script(), 0);
+    const vendor = join(directory, "vendor");
+    assert.equal(await readFile(join(vendor, "wasmacs/licenses/NOTICE.txt"), "utf8"), "where the source is\n");
+    assert.match(await readFile(join(vendor, "wasmacs/licenses/GPL-3.0-or-later.txt"), "utf8"), /GNU GENERAL PUBLIC LICENSE/);
+    assert.match(await readFile(join(vendor, "elisp-react/LICENSE"), "utf8"), /^MIT License/);
+    assert.equal(await readFile(join(vendor, `${emacs}/temacs.data.parts/part-000`), "utf8"), "data");
+    // A name in the list is a file of that directory or nothing.
+    await writeFile(join(site, "wasmacs/licenses/files.txt"), "../../../outside.txt\n");
+    assert.notEqual(await script(), 0);
+    assert.equal(existsSync(join(directory, "outside.txt")), false);
+  } finally {
+    await new Promise((resolve) => web.close(resolve));
+    await rm(site, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+

@@ -103,7 +103,7 @@ Emacs でプロジェクトのファイルを開いているときに使える�
 
 [`examples/sqlite`](examples/sqlite) は、この方法でデータを持つ読書リストです（[試す](https://modeverv.github.io/elisp-studio/?example=sqlite)）。studio の中では、データベースはサーバー役の Emacs のメモリ上のファイルで、studio がブラウザ（IndexedDB）に保存して次回に引き継ぎます。ネイティブの Emacs で動かすと `.data/app.db` というファイルになり、`sqlite3` コマンドでも開けます。
 
-SQLite の同梱について：SQLite は[パブリックドメイン](https://www.sqlite.org/copyright.html)なので、配布に条件はありません。ブラウザで動く Emacs には、wasmacs がリンクしています（wasmacs の README の「同梱ソフトウェアとライセンス」を参照）。ネイティブの Emacs は、SQLite つきでビルドされていれば使えます。通常のパッケージはそうなっています（`(sqlite-available-p)` で確認できます）。このリポジトリにも、ダウンロードしたプロジェクトにも、SQLite 自体は含まれません。
+SQLite の同梱について：SQLite は[パブリックドメイン](https://www.sqlite.org/copyright.html)なので、配布に条件はありません。ブラウザで動く Emacs には、wasmacs がリンクしています（wasmacs の README の「ライセンス」を参照）。ネイティブの Emacs は、SQLite つきでビルドされていれば使えます。通常のパッケージはそうなっています（`(sqlite-available-p)` で確認できます）。このリポジトリにも、ダウンロードしたプロジェクトにも、SQLite 自体は含まれません。
 
 studio の中では、サーバーはブラウザのタブの中の3つ目の Emacs です。アプリケーションから `/api/...` へのリクエストはタブの外に出ず、studio がその Emacs に渡します。`server.el` を保存すると、動いているサーバーが変わります。
 
@@ -320,7 +320,7 @@ Caddy の後ろに複数のワーカーを置いた場合（`ab -k -c 40`）、�
   run.sh              ./run.sh [PORT]。Emacs がこのディレクトリの Web サーバーになる
   fetch-emacs.sh      任意。ブラウザ用の Emacs を vendor/ にダウンロードする（約160MB、curl が必要）
   backup.sh           サーバーが保持するもの（.data/）を、動かしたままコピーする
-  server/             run.sh が Emacs に読み込ませるもの（HTTP サーバーと app-server.el）
+  server/             run.sh が Emacs に読み込ませるもの（HTTP サーバーと app-server.el、そのライセンス表示）
   README.txt
   ```
 
@@ -371,3 +371,16 @@ node tools/record-demo.mjs   # この README の画像を録画し直す（ffmpe
 - タブの中のサーバーは、データのディレクトリをメモリ上に持ちます。studio は、内容を変えたリクエストのあとでそれを IndexedDB にコピーします。小さなデータベースなら問題ありませんが、大きなものには向きません。
 - `run.sh` は 127.0.0.1 でだけ待ち受けます。公開する場合や、複数のコアを使う場合は、手前にリバースプロキシが必要です（あるものとないものは、上の「公開する」にあります）。
 - studio のタブの中では、scrypt のハッシュは作成も照合もできず、アップロードできるファイルは 32 MB までです。Cookie は、studio を再読み込みするまで保持されます。タブはアプリケーションを書く場所であり、他の人に向けて動かす場所ではありません。
+
+## ライセンス
+
+MIT ライセンスです（[LICENSE](LICENSE)）。ライセンスの表示を残せば、自由に使えます。対象は、studio とプロジェクトサーバー（`lisp/app-server.el`、`tools/serve-project.el`）です。
+
+自分のアプリケーションの一部になるものには、条件が何もありません（[0BSD](template/LICENSE)）。テンプレート、サンプル、そしてダウンロードしたプロジェクトに `tools/project/` から入るファイル（`run.sh`、`fetch-emacs.sh`、`backup.sh`、デプロイ用の設定、`README.txt`）です。ダウンロードしたプロジェクトに付くライセンス表示は `server/LICENSE` の1つだけで、`server/` にある2つのサーバー用ファイルのためのものです。
+
+残りは、Emacs が GNU GPL（バージョン3以降）であることから決まります。
+
+- **MIT で問題がない理由**：サーバー用ファイルとテンプレートは Emacs Lisp で、GNU Emacs の中で動きます。GPL は、[GPL のプログラムと結合されるコード](https://www.gnu.org/licenses/gpl-faq.html#GPLAndPlugins)に、GPL と両立するライセンスを求めます。MIT はその1つで（FSF の一覧では [Expat ライセンス](https://www.gnu.org/licenses/license-list.html#Expat)という名前です）、0BSD も同じです。
+- **このリポジトリにも、ダウンロードしたプロジェクトにも、Emacs は含まれていません。** ブラウザの Emacs は [wasmacs](https://github.com/modeverv/wasmacs) のサイトから読み込まれ、サーバーの Emacs はそのマシンにインストールされているものです。
+- **`./fetch-emacs.sh` を実行すると、状況が変わります。** ブラウザの Emacs が `vendor/` にコピーされるので、`vendor/` を配信するサイトは、GPL のもとで GNU Emacs を配布することになります。GPL が求めるものは、スクリプトが一緒に取ってきます。`vendor/wasmacs/licenses/` にライセンスの全文と `NOTICE.txt` が入り、`NOTICE.txt` にはそのビルドのソースの場所が書いてあります。このディレクトリは、コピーと一緒に置いたままにしてください。
+- **自分で書いたファイル**：`app.el` は Emacs の中で動き、Emacs の Lisp ライブラリを使い、すべての閲覧者に送られます。FSF の解釈では、[そうしたプログラム](https://www.gnu.org/licenses/gpl-faq.html#IfInterpreterIsGPL)を公開するときは、GPL と両立するライセンスにする必要があります。MIT、0BSD、GPL そのもののいずれでも条件を満たします。`server.el` は自分のサーバーに置いたままです。誰にも渡さないものには、この条件はかかりません。

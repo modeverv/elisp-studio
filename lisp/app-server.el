@@ -1,5 +1,8 @@
 ;;; app-server.el --- what a project's server.el runs on  -*- lexical-binding: t; -*-
 
+;; Copyright (c) 2026 modeverv
+;; SPDX-License-Identifier: MIT
+
 ;; A project may have a server side: a file server.el that defines
 ;;
 ;;   (defun app-server-handle (method path body) ...)

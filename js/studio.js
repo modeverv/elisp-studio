@@ -1,4 +1,6 @@
 // elisp-studio: write a web application in the browser and watch it change.
+// Copyright (c) 2026 modeverv
+// SPDX-License-Identifier: MIT
 //
 //   left    GNU Emacs (wasmacs), editing the project's files in its own
 //           filesystem, /home/user/elisp-studio/app
@@ -628,6 +630,7 @@ const RUNTIME_FILES = [
   ["README.txt", "tools/project/README.txt", false],
   ["server/serve-project.el", "tools/serve-project.el", false],
   ["server/app-server.el", "lisp/app-server.el", false],
+  ["server/LICENSE", "LICENSE", false],          // of the two files above (MIT)
   ["server/deploy/Caddyfile", "tools/project/deploy/Caddyfile", false],
   ["server/deploy/nginx.conf", "tools/project/deploy/nginx.conf", false],
   ["server/deploy/app.service", "tools/project/deploy/app.service", false],

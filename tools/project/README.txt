@@ -39,3 +39,15 @@ tell the server the address it is published under:
 
 server/deploy/ has what that takes: a Caddyfile, an nginx.conf, and a
 systemd unit that keeps run.sh running.
+
+Licences.  server/serve-project.el and server/app-server.el are
+elisp-studio's, under the MIT licence: keep server/LICENSE with them.
+Everything else that came with this project (run.sh, fetch-emacs.sh,
+backup.sh, server/deploy/, this file, and the files the project started
+from) is yours without conditions.  The Emacs that fetch-emacs.sh puts
+into vendor/ is GNU Emacs, under the GNU GPL: a site that serves vendor/
+distributes it, and vendor/wasmacs/licenses/ (NOTICE.txt and the licence
+texts, which the script fetches too) has to stay with it.  Your own app.el
+runs inside that Emacs and is sent to every visitor; by the FSF's reading
+of the GPL it should be under a GPL-compatible licence (MIT, 0BSD, the GPL
+itself: https://www.gnu.org/licenses/gpl-faq.html#IfInterpreterIsGPL).

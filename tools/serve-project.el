@@ -1,5 +1,8 @@
 ;;; serve-project.el --- run a studio project under a native Emacs  -*- lexical-binding: t; -*-
 
+;; Copyright (c) 2026 modeverv
+;; SPDX-License-Identifier: MIT
+
 ;; A project made in the studio is a directory: index.html, app.el,
 ;; style.css, and perhaps server.el.  This file makes a native Emacs the web
 ;; server of such a directory: it serves the files, and it answers

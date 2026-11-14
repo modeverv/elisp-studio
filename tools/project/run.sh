@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: 0BSD  (yours to change; no conditions)
 # Run this application: GNU Emacs is its web server.
 #
 #   ./run.sh [PORT]        then open http://127.0.0.1:PORT/  (default 8018)
