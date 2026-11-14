@@ -271,6 +271,11 @@ try {
     ('("POST" "/api/login") (app-server-set-cookie "session" (app-server-token 8)) (app-server-set-header "X-Greeting" "hello") t)
     ('("GET" "/api/me") (or (app-server-cookie "session") (app-server-refuse "Sign in first" 401)))
     ('("POST" "/api/logout") (app-server-delete-cookie "session") t)
+    ('("POST" "/api/hash")
+     (app-server-defer (lambda (respond _fail) (app-server-password-hash-later (car (read-from-string body)) respond))))
+    ('("POST" "/api/check")
+     (let ((sent (car (read-from-string body))))
+       (app-server-defer (lambda (respond _fail) (app-server-password-check-later (car sent) (cadr sent) respond)))))
     (_ (signal 'file-missing`);
   await until("window.elispStudio.server?.source?.includes('/api/later')", "the deferring server.el is applied");
   const viaServer = (path, options = {}) => js(`(async () => {
@@ -295,6 +300,13 @@ try {
   await viaServer("/api/logout", { method: "POST" });
   assert.equal((await viaServer("/api/me"))[0], 401);
   pass("server.el reads and sets headers and cookies; a refusal carries its status");
+
+  // Passwords: the same functions as under a native Emacs, with fewer rounds here.
+  const hashed = await viaServer("/api/hash", { method: "POST", body: '"correct horse"' });
+  assert.match(hashed[1], /^"pbkdf2-sha256\$10000\$[0-9a-f]{32}\$[0-9a-f]{64}"$/);
+  assert.equal((await viaServer("/api/check", { method: "POST", body: `("correct horse" ${hashed[1]})` }))[1], "t");
+  assert.equal((await viaServer("/api/check", { method: "POST", body: `("correct horsf" ${hashed[1]})` }))[1], "nil");
+  pass(`server.el hashes and checks a password in the tab (${Math.round(hashed[2])} ms for 10,000 rounds)`);
 
   // Publishing: the project as a ZIP, and with git from inside Emacs.
   const zipNames = await js(`(async () => {

@@ -1,0 +1,14 @@
+body { margin: 0; padding: 24px; background: #16181d; color: #e6e6e6; font: 15px/1.6 system-ui, sans-serif; }
+h1 { font-size: 22px; margin: 0 0 12px; color: #c792ea; }
+form { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+input[type="file"] { flex: 1; font: inherit; color: inherit; }
+button { font: inherit; padding: 4px 14px; border: 0; border-radius: 4px; background: #5b3d8f; color: #fff; cursor: pointer; }
+button:disabled { background: #33363d; color: #8a8f98; cursor: default; }
+ul.files { list-style: none; margin: 12px 0; padding: 0; }
+li.file { display: flex; align-items: center; gap: 12px; padding: 7px 12px; margin: 5px 0;
+          background: #20232a; border-radius: 6px; }
+li.file .name { flex: 1; color: #82aaff; overflow-wrap: anywhere; }
+li.file .size, li.file .at { color: #6b7079; font-size: 12px; font-variant-numeric: tabular-nums; }
+li.file button { padding: 1px 9px; background: #33363d; }
+.status { color: #8a8f98; }
+.error { color: #ef9a9a; }

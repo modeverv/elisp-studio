@@ -29,7 +29,7 @@ Both halves are Emacs. On the left is the real GNU Emacs 30.2, running in the pa
 3. In Emacs, change a text in `app.el`, for example `"Count: %d"`, and save with `C-x C-s`.
 4. The application shows the new text, and the counter still has its count.
 
-The project is `/home/user/elisp-studio/app` in Emacs's filesystem, which the browser keeps: it is still there at the next visit. A new project starts from `template/`, or, with `?example=stopwatch` or `?example=sqlite` in the address, from that directory of `examples/`; a project that exists is never replaced (remove the directory in Emacs to start over). It is the same `/home/user` that the wasmacs page itself uses, so the project is also there when you open wasmacs directly. Its files:
+The project is `/home/user/elisp-studio/app` in Emacs's filesystem, which the browser keeps: it is still there at the next visit. A new project starts from `template/`, or, with `?example=stopwatch`, `?example=sqlite` or `?example=upload` in the address, from that directory of `examples/`; a project that exists is never replaced (remove the directory in Emacs to start over). It is the same `/home/user` that the wasmacs page itself uses, so the project is also there when you open wasmacs directly. Its files:
 
 ```text
 index.html   the page: a <div id="app">, the stylesheet, <script type="text/emacs-lisp" src="app.el">
@@ -148,6 +148,59 @@ There are three things to wait for, none of which blocks:
 
 Computing is not waiting: Emacs Lisp that runs, and SQLite, still hold the one thread. That is what `app-server-run` is for.
 
+### Files from visitors
+
+The body of a request is text for the handler, a megabyte at most. A file is something else: the server writes it to disk as it arrives, whatever its size, and the handler gets its name. Which requests bring a file is for `server.el` to say, having seen only the headers, before a byte of it is taken:
+
+```elisp
+(defun app-server-upload-p (method path size)
+  (and (equal path "/api/photos")
+       (app-visitor)                                   ; signed in? (refuses with 401 otherwise)
+       (or (< size (* 200 1024 1024)) (app-server-refuse "Too large" 413))))
+
+('("POST" "/api/photos")
+ (let ((name (concat (app-server-token 8) ".jpg")))
+   (app-server-keep-upload name)                       ; now it is (app-server-file name)
+   name))
+('("GET" "/api/photo")
+ (app-server-send-file (app-server-file (app-server-parameter "name")) :type "image/jpeg"))
+```
+
+`(app-server-upload)` is `(:file FILE :size BYTES :type STRING)`, a temporary file that is gone with the answer unless the handler kept it. `(app-server-file NAME)` is a file among those the application keeps (`.data/files/`); NAME cannot point anywhere else. `(app-server-files)` lists them, and `(app-server-send-file FILE :type :name)` answers with one, read and sent piece by piece.
+
+The page sends the file itself as the body, not a form. In elisp-react that is one option of `react-fetch`; the file goes from the file input to the server without passing through Lisp:
+
+```elisp
+(input (:type "file" :ref "file"
+        :on-change (lambda (event) (react-set-state self :chosen (aref (plist-get event :files) 0)))))
+...
+(react-fetch "/api/photos" :method "POST" :file (react-ref self "file") :then ...)
+```
+
+[`examples/upload`](examples/upload) is a shelf of files made of this ([try it](https://modeverv.github.io/elisp-studio/?example=upload)). Measured: 300 MB arrive in 1.2 seconds (240 MB per second) while the server's memory grows by 30 MB, come back in 0.8 seconds with the same checksum, and other requests are answered at their usual rate meanwhile, also while two visitors download slowly. In the studio's tab a file travels as base64 and is kept in memory: 32 MB at most, enough to try an upload out.
+
+### Passwords
+
+A password is not kept; a hash that is slow to make is, so that a stolen database cannot be searched for passwords at a billion guesses a second. `app-server.el` has PBKDF2 with HMAC-SHA-256 and 600,000 rounds (the count OWASP gives for it), written with Emacs's own `secure-hash` and checked against the test vectors of RFC 7914. Slow means two seconds of one core, so the work goes to a second Emacs and the server stays free:
+
+```elisp
+('("POST" "/api/login")
+ (let* ((sent (car (read-from-string body))) (name (car sent)) (password (cadr sent)))
+   (app-server-defer
+    (lambda (respond fail)
+      (app-server-password-check-later
+       password (app-stored-hash name)
+       (lambda (right)
+         (if (not right)
+             (funcall fail "Wrong name or password" 401)
+           (app-server-set-cookie "session" (app-new-session name))
+           (funcall respond t))))))))
+```
+
+`(app-server-password-hash-later PASSWORD FUNCTION)` makes the hash to store (`"pbkdf2-sha256$600000$SALT$HASH"`). Both exist without `-later` too, for a script.
+
+Why not something stronger: a search turned up no bcrypt, scrypt or Argon2 written in Emacs Lisp. There are [kaesar-pbkdf2.el](https://github.com/mhayashi1120/Emacs-kaesar) (PBKDF2 in Lisp, GPL), a PBKDF2 inside [pg-el](https://github.com/emarsden/pg-el) (through GnuTLS, for PostgreSQL's SCRAM), and two bindings to libsodium that have to be compiled as modules ([sodium.el](https://github.com/dakra/sodium.el), which exposes `crypto_box` only, and [esodium](https://codeberg.org/coopi/emacs-esodium), in Rust). PBKDF2 is thirty lines on `secure-hash` and needs nothing installed, in a native Emacs and in the browser's alike; with the round count above it is an accepted choice, though Argon2 resists graphics cards better. A password of a few characters stays weak under any of them.
+
 ### Publishing it
 
 The server listens on 127.0.0.1 and speaks plain HTTP. To put the application on the internet, a reverse proxy on the same machine goes in front of it: Caddy or nginx does HTTPS, HTTP/2 and compression, Emacs does the rest. The server is told the address it is published under:
@@ -168,10 +221,12 @@ The download brings the configurations in `server/deploy/`: a `Caddyfile` (four 
 | Slow or silent visitors | Half a request is given 20 seconds, an idle connection 180 (longer than the proxies keep theirs). |
 | Files | Sent with an `ETag`; an unchanged file is answered with `304`. `server.el`, `server/`, `.data/` and hidden files are never sent, nor anything a symbolic link leads to outside the project. |
 | Log | One line per request on standard error: method, path, status, milliseconds. |
+| Several cores | `WORKERS=4 ./run.sh` starts four Emacs processes on four ports and the proxy spreads the requests over them (the shipped configurations say how). They share `.data/`: SQLite switches to its write-ahead log and waits for a busy database, `app-server-write` replaces files in one step. What a handler keeps in a Lisp variable is known to one worker only, so sessions belong in the database. If a worker ends, the script ends them all, for systemd to start again. |
+| Uploads | Caddy passes a body of any size on as it arrives; for nginx, `client_max_body_size` in the shipped file sets the limit. |
 
-Tried with Caddy 2.11 (HTTPS with HTTP/2) and nginx 1.30 in front, with the shipped configurations: pages, sign-in, deferred answers, uploads up to the limit, compression and `304` all pass through, and a load of 20,000 requests through Caddy (22,000 per second) had no failures. Six minutes of mixed load (2.5 million requests, among them 370,000 SQLite inserts) ended without an error. In a second run the number of live Lisp objects after a collection was the same after each kind of load as at the start (no leak in Lisp), while the process grew from 59 MB to 105 MB and stayed there. That is fifteen minutes, not weeks. The systemd unit has not been run.
+Tried with Caddy 2.11 (HTTPS with HTTP/2) and nginx 1.30 in front, with the shipped configurations: pages, sign-in, deferred answers, compression and `304` all pass through, a 300 MB file goes up and comes back intact through both (to four workers, which all see it afterwards), and a load of 20,000 requests through Caddy (22,000 per second) had no failures. Six minutes of mixed load (2.5 million requests, among them 370,000 SQLite inserts) ended without an error. In a second run the number of live Lisp objects after a collection was the same after each kind of load as at the start (no leak in Lisp), while the process grew from 59 MB to 105 MB and stayed there. That is fifteen minutes, not weeks. The systemd unit has not been run.
 
-What is not there: more than one process (one Emacs uses one core), uploads of files, streaming answers and WebSockets, and password hashing made for the purpose (Emacs has SHA-2, no bcrypt or Argon2; to check passwords, let the proxy do it, with Caddy's `basic_auth` for instance). Nobody has attacked this server in earnest: it is a few hundred lines of Emacs Lisp behind a proxy, for applications among friends.
+What is not there: streaming answers and WebSockets, forms that upload (`multipart/form-data`; a page sends the file itself), and ranges of a file (a video cannot be skipped through). Nobody has attacked this server in earnest: it is a few hundred lines of Emacs Lisp behind a proxy, for applications among friends.
 
 ### How fast is that server?
 
@@ -187,6 +242,8 @@ It is one Emacs with one thread, working like Node.js: connections wait in the o
 | an SQLite `INSERT` (written to disk) | 2,810 | 2,180 |
 | a static file | 9,100 | 10,500 |
 | a static file the browser has (`304`) | | 16,200 |
+
+With several workers behind Caddy (`ab -k -c 40`): the handler that computes goes from 2,630 per second with one worker to 5,320 with two and 10,500 with four, as many times faster as there are cores; an SQLite `SELECT` from 17,000 to 34,900; inserts from four workers at once are all written (15,000 of 15,000), about 10,000 per second.
 
 For comparison, Node.js 26 on the same machine: the small answer 21,200 (kept connections: 66,800), `fib(20)` 11,000. With one connection at a time Emacs does 7,300 per second, with 100 at a time 20,400. More than about a hundred connections arriving in the same instant exceed the queue the operating system keeps for the server; a proxy in front spares it that.
 
@@ -254,6 +311,7 @@ npm run test:unit        # tar, zip, and a project served by a native Emacs
 npm run test:e2e         # the studio in headless Chrome
 npm run test:e2e:plain   # the same without isolation headers, as GitHub Pages serves
 npm run test:e2e:sqlite  # the SQLite example: in the studio, then downloaded and run by itself
+npm run test:e2e:upload  # the upload example in the studio
 node tools/record-demo.mjs   # record the pictures of this README again (needs ffmpeg)
 ```
 
@@ -266,5 +324,5 @@ node tools/record-demo.mjs   # record the pictures of this README again (needs f
 - The editing Emacs expands the project's macros when it checks a buffer. A macro that loops forever would hang the editor.
 - Pushing to GitHub has been tested only against a repository inside Emacs's own filesystem; the path through the companion extension is wasmacs's and is tested there.
 - The server in the tab keeps its data directory in memory and the studio copies it to IndexedDB after a request that changed it: fine for a small database, not for a large one.
-- `run.sh` listens on 127.0.0.1 and is a single Emacs on one core; publishing it takes a reverse proxy in front ("Publishing it" above says what is and is not there).
-- In the studio's tab, `app-server-token` has only Emacs's `random` to draw on, and cookies last until the studio is reloaded.
+- `run.sh` listens on 127.0.0.1; publishing it, and using more than one core, takes a reverse proxy in front ("Publishing it" above says what is and is not there).
+- In the studio's tab, `app-server-token` has only Emacs's `random` to draw on, password hashes get 10,000 rounds instead of 600,000, an uploaded file is 32 MB at most, and cookies last until the studio is reloaded: it is the place to write the application, not to run it for others.

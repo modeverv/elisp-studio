@@ -5,6 +5,8 @@
 #   PUBLIC_ORIGIN=https://example.com ./run.sh
 #                          behind a reverse proxy that publishes it there
 #                          (server/deploy/ has configurations)
+#   WORKERS=4 ./run.sh     four Emacs processes, on PORT to PORT+3, for a
+#                          proxy to spread the requests over: four cores
 #
 # Needs bash and a native GNU Emacs (29 or later; with SQLite support if
 # server.el uses a database).  Emacs serves the files of this directory and
@@ -30,6 +32,33 @@ if [ -z "${emacs_bin}" ]; then
 fi
 [ -n "${emacs_bin}" ] || { echo "run.sh: no Emacs found; set EMACS=/path/to/emacs" >&2; exit 127; }
 
-exec "${emacs_bin}" --batch -Q \
-  --eval "(setq serve-project-directory \"${here}/\" serve-project-port ${1:-8018})" \
-  -l "${here}/server/serve-project.el" -f serve-project-run
+port="${1:-8018}"
+workers="${WORKERS:-1}"
+serve() {
+  exec "${emacs_bin}" --batch -Q \
+    --eval "(setq serve-project-directory \"${here}/\" serve-project-port $1)" \
+    -l "${here}/server/serve-project.el" -f serve-project-run
+}
+if [ "${workers}" -le 1 ]; then
+  serve "${port}"
+else
+  # One Emacs uses one core.  WORKERS of them, on PORT, PORT+1, ...; the
+  # reverse proxy in front spreads the requests over them.
+  pids=""
+  trap 'kill ${pids} 2>/dev/null' EXIT
+  trap 'exit 0' INT TERM
+  worker=0
+  while [ "${worker}" -lt "${workers}" ]; do
+    serve "$((port + worker))" &
+    pids="${pids} $!"
+    worker=$((worker + 1))
+  done
+  # If one of them ends, all end: whatever keeps this script running
+  # (systemd) then starts them again together.
+  while :; do
+    for pid in ${pids}; do
+      kill -0 "${pid}" 2>/dev/null || exit 1
+    done
+    sleep 1
+  done
+fi

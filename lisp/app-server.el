@@ -40,6 +40,10 @@
 ;;   `app-server-header', `app-server-cookie'     what came with the request
 ;;   `app-server-set-header', `app-server-set-cookie', `app-server-delete-cookie'
 ;;   `app-server-token'                           a random name for a session
+;;   `app-server-password-hash-later', `app-server-password-check-later'
+;;                                                see "Passwords" below
+;;   `app-server-upload', `app-server-keep-upload', `app-server-file',
+;;   `app-server-send-file'                       files (see "Files" below)
 ;;
 ;; This file is loaded before server.el in both.  It gives the server
 ;; places to keep data:
@@ -74,15 +78,26 @@
           (read (current-buffer)))
       default)))
 
+(defvar app-server-shared nil
+  "Non-nil when several server processes share the data directory.
+\(WORKERS=4 ./run.sh.)  What a handler keeps in a Lisp variable is then
+known to one of them only: keep it with `app-server-write' or in the
+database.")
+
 (defun app-server-write (name value)
-  "Keep the Lisp VALUE under NAME.  Returns VALUE."
-  (let ((file (app-server--data-file name))
-        (print-length nil) (print-level nil)
-        (coding-system-for-write 'utf-8-unix))
-    (make-directory (file-name-directory file) t)
-    (with-temp-file file
+  "Keep the Lisp VALUE under NAME.  Returns VALUE.
+The file is replaced in one step: a reader sees the old value or the new
+one, never half of one."
+  (let* ((file (app-server--data-file name))
+         (print-length nil) (print-level nil)
+         (coding-system-for-write 'utf-8-unix)
+         (new (progn (make-directory (file-name-directory file) t)
+                     (make-temp-file (concat file ".")))))
+    (with-temp-file new
       (prin1 value (current-buffer))
-      (insert "\n")))
+      (insert "\n"))
+    (set-file-modes new #o644)
+    (rename-file new file t))
   value)
 
 (defvar app-server--databases nil "Alist: name -> open SQLite database.")
@@ -103,6 +118,12 @@ text from what a page sent."
         (error "Not a name for a database: %S" name))
       (make-directory app-server-data-directory t)
       (let ((database (sqlite-open (expand-file-name (concat name ".db") app-server-data-directory))))
+        ;; Another process may be writing (several workers, or the sqlite3
+        ;; tool): wait for it instead of failing at once.
+        (sqlite-pragma database "busy_timeout = 5000")
+        ;; With several workers: readers and the one writer do not block
+        ;; one another.
+        (when app-server-shared (sqlite-pragma database "journal_mode = WAL"))
         (setf (alist-get name app-server--databases nil nil #'equal) database)
         database))))
 
@@ -113,6 +134,7 @@ text from what a page sent."
 (cl-defstruct (app-server--request (:constructor app-server--request-create))
   parameters            ; the query: an alist (NAME VALUE)
   headers               ; alist (NAME . VALUE), names in lower case
+  upload                ; (:file FILE :size BYTES :type STRING) when the body is a file
   response-headers)     ; list of (NAME . VALUE), newest first
 
 (defvar app-server--request nil
@@ -193,6 +215,105 @@ ATTRIBUTES is a plist:
   "Make the visitor's browser forget the cookie NAME."
   (app-server-set-cookie name "" :max-age 0))
 
+;;;; Files: what visitors send, and sending files back
+
+;; The body of a request is text for the handler, a megabyte at most.  A
+;; file is something else: the server writes it to disk as it arrives and
+;; the handler gets its name.  Which requests bring a file is for server.el
+;; to say, before any of it is taken:
+;;
+;;   (defun app-server-upload-p (method path size)
+;;     (and (equal path "/api/photos") (app-visitor) (< size (* 200 1024 1024))))
+;;
+;;   ('("POST" "/api/photos")
+;;    (let ((name (concat (app-server-token 8) ".jpg")))
+;;      (app-server-keep-upload name)
+;;      name))
+;;   ('("GET" "/api/photo")
+;;    (app-server-send-file (app-server-file (app-server-parameter "name")) :type "image/jpeg"))
+;;
+;; The page sends the file itself as the body (fetch with a File), not a
+;; form.
+
+(defun app-server-upload ()
+  "The file that came as the body of the request being answered, or nil.
+A plist (:file FILE :size BYTES :type STRING): FILE is a temporary file,
+gone when the request is answered unless the handler moved it away
+\(`app-server-keep-upload').  A request brings a file when server.el
+defines `app-server-upload-p' and that says so."
+  (app-server--request-upload (app-server--current-request)))
+
+(defun app-server-file (name)
+  "The file NAME among the files this application keeps.
+NAME is letters, digits, dots, hyphens and underscores, not starting with
+a dot: a name that came from a visitor cannot point anywhere else."
+  (unless (string-match-p "\\`[A-Za-z0-9_-][A-Za-z0-9._-]*\\'" name)
+    (error "Not a name for a kept file: %S" name))
+  (let ((directory (expand-file-name "files/" app-server-data-directory)))
+    (make-directory directory t)
+    (expand-file-name name directory)))
+
+(defun app-server-files ()
+  "The names of the files this application keeps, in alphabetical order."
+  (let ((directory (expand-file-name "files/" app-server-data-directory)))
+    (and (file-directory-p directory) (directory-files directory nil "\\`[^.]"))))
+
+(defun app-server-keep-upload (name)
+  "Keep the file that came with the request as `(app-server-file NAME)'.
+Returns its size in bytes."
+  (let ((upload (or (app-server-upload) (error "This request brought no file"))))
+    (rename-file (plist-get upload :file) (app-server-file name) t)
+    (plist-get upload :size)))
+
+(cl-defstruct (app-server--file-answer (:constructor app-server--file-answer-create))
+  file type name)
+
+(defun app-server-send-file (file &rest options)
+  "Answer the request with FILE: return this from `app-server-handle'.
+\(Or pass it to the RESPOND of `app-server-defer'.)  OPTIONS is a plist:
+:type STRING is its media type (\"application/octet-stream\" by default);
+with :name STRING the browser saves it under that name instead of
+showing it.  FILE is usually
+`(app-server-file NAME)'; do not make a file name out of what a visitor
+sent in any other way."
+  (unless (file-regular-p file) (signal 'file-missing (list "No such file" (file-name-nondirectory file))))
+  (app-server--file-answer-create :file file :type (plist-get options :type) :name (plist-get options :name)))
+
+(defun app-server--answer-body (data)
+  "What a host sends for DATA, the handler's answer: printed text, or
+\(:file FILE :type TYPE :name NAME) for `app-server-send-file'."
+  (if (app-server--file-answer-p data)
+      (list :file (app-server--file-answer-file data)
+            :type (or (app-server--file-answer-type data) "application/octet-stream")
+            :name (app-server--file-answer-name data))
+    (let ((print-length nil) (print-level nil))
+      (prin1-to-string data))))
+
+(defun app-server-upload-accept (method path size headers)
+  "For the host: does the request that begins with HEADERS bring a file?
+The value is t (take the body into a file), nil (it is an ordinary
+request) or, when server.el refused it, the answer [STATUS TEXT HEADERS]."
+  (when (fboundp 'app-server-upload-p)
+    (let* ((question (string-search "?" path))
+           (app-server--request
+            (app-server--request-create
+             :parameters (and question (url-parse-query-string (substring path (1+ question))))
+             :headers headers))
+           (answer (lambda (status message)
+                     (vector status (prin1-to-string message)
+                             (reverse (app-server--request-response-headers app-server--request))))))
+      (condition-case err
+          (and (funcall 'app-server-upload-p method (if question (substring path 0 question) path) size) t)
+        (app-server-refusal (funcall answer (nth 2 err) (nth 1 err)))
+        (file-missing (funcall answer 404 (error-message-string err)))
+        (error (funcall answer 400 (error-message-string err)))))))
+
+(defun app-server-upload-file ()
+  "For the host: a new temporary file to take an upload into."
+  (let ((directory (expand-file-name "uploads/" app-server-data-directory)))
+    (make-directory directory t)
+    (expand-file-name (app-server-token 16) directory)))
+
 (defun app-server-token (&optional bytes)
   "A random string nobody can guess: BYTES (default 32) random bytes in hex.
 For the names of sessions and the like; `random' is not for that.  (In
@@ -215,6 +336,127 @@ is: that Emacs has no better source.)"
            (setq data (apply #'unibyte-string (cl-loop repeat bytes collect (random 256)))))
           (t (error "This system gives no random bytes")))
     (mapconcat (lambda (byte) (format "%02x" byte)) data "")))
+
+;;;; Passwords
+
+;; A password is never kept: what is kept is a hash made to be slow, so
+;; that whoever gets hold of the database cannot try a billion guesses a
+;; second.  This is PBKDF2 with HMAC-SHA-256 (RFC 8018), 600,000 rounds
+;; (OWASP's number for it), written with Emacs's own `secure-hash'.
+;;
+;; Slow means slow for the server too: about three seconds of one core.
+;; So that nobody else waits, `app-server-password-hash-later' and
+;; `app-server-password-check-later' give the work to a second Emacs:
+;;
+;;   ('("POST" "/api/login")
+;;    (pcase-let ((`(,name ,password) (car (read-from-string body))))
+;;      (app-server-defer
+;;       (lambda (respond fail)
+;;         (app-server-password-check-later
+;;          password (app-stored-hash name)
+;;          (lambda (right)
+;;            (if (not right)
+;;                (funcall fail "Wrong name or password" 401)
+;;              (app-server-set-cookie "session" (app-new-session name))
+;;              (funcall respond t))))))))
+
+(defvar app-server-password-rounds 600000
+  "How many rounds a new password hash gets.
+A hash says how many it has, so hashes made with another number stay
+valid.")
+
+(defconst app-server--file (or load-file-name buffer-file-name)
+  "This file, for the second Emacs that hashes passwords.")
+
+(defun app-server--pbkdf2 (password salt rounds)
+  "PBKDF2-HMAC-SHA-256 of PASSWORD and SALT, unibyte strings: 32 bytes in hex."
+  (let* ((key (if (> (length password) 64) (secure-hash 'sha256 password nil nil t) password))
+         (block (concat key (make-string (- 64 (length key)) 0)))
+         (inner (apply #'unibyte-string (mapcar (lambda (byte) (logxor byte #x36)) block)))
+         (outer (apply #'unibyte-string (mapcar (lambda (byte) (logxor byte #x5c)) block)))
+         (u (secure-hash 'sha256
+                         (concat outer (secure-hash 'sha256 (concat inner salt (unibyte-string 0 0 0 1))
+                                                    nil nil t))
+                         nil nil t))
+         (total (vconcat u)))
+    (dotimes (_ (1- rounds))
+      (setq u (secure-hash 'sha256 (concat outer (secure-hash 'sha256 (concat inner u) nil nil t))
+                           nil nil t))
+      (dotimes (index 32) (aset total index (logxor (aref total index) (aref u index)))))
+    (mapconcat (lambda (byte) (format "%02x" byte)) total "")))
+
+;; Its loop runs millions of times: compiled, whatever loaded this file.
+(defvar byte-compile-warnings)
+(unless (byte-code-function-p (symbol-function 'app-server--pbkdf2))
+  (ignore-errors
+    (require 'bytecomp)
+    (let ((byte-compile-warnings nil))
+      (byte-compile 'app-server--pbkdf2))))
+
+(defun app-server-password-hash (password)
+  "A hash of PASSWORD, to keep instead of it.
+It reads \"pbkdf2-sha256$ROUNDS$SALT$HASH\".  Takes seconds, during which
+this Emacs does nothing else; in a handler use
+`app-server-password-hash-later'."
+  (let ((salt (app-server-token 16)))
+    (format "pbkdf2-sha256$%d$%s$%s" app-server-password-rounds salt
+            (app-server--pbkdf2 (encode-coding-string password 'utf-8) salt app-server-password-rounds))))
+
+(defun app-server-password-check (password hash)
+  "Non-nil if PASSWORD is the one HASH was made of (`app-server-password-hash').
+Takes as long as making the hash did; in a handler use
+`app-server-password-check-later'."
+  (let ((parts (split-string (or hash "") "\\$")))
+    (and (= (length parts) 4)
+         (equal (nth 0 parts) "pbkdf2-sha256")
+         (string-match-p "\\`[0-9]+\\'" (nth 1 parts))
+         (let ((mine (app-server--pbkdf2 (encode-coding-string password 'utf-8) (nth 2 parts)
+                                         (string-to-number (nth 1 parts))))
+               (theirs (nth 3 parts))
+               (difference 0))
+           ;; Compare all of it: how long this takes says nothing about
+           ;; where the first difference is.
+           (and (= (length mine) (length theirs))
+                (progn (dotimes (index (length mine))
+                         (setq difference (logior difference (logxor (aref mine index) (aref theirs index)))))
+                       (= difference 0)))))))
+
+(defun app-server--password-later (form function)
+  "Evaluate FORM, which hashes, in a second Emacs; FUNCTION gets its value.
+Without programs to run (the studio's browser tab) it is done here."
+  (if app-server--tab
+      (funcall function (apply (car form) (nthcdr 2 form)))
+    (app-server-run
+     (list (expand-file-name invocation-name invocation-directory) "--batch" "-Q"
+           "-l" app-server--file "--eval" "(app-server--password-child)")
+     ;; The password goes in by the pipe, not on the command line, where
+     ;; other users of the machine could read it.
+     :input (base64-encode-string (encode-coding-string (prin1-to-string form) 'utf-8) t)
+     :then (lambda (result)
+             (unless (eq (plist-get result :status) 0) (error "The password could not be hashed"))
+             (funcall function (car (read-from-string (plist-get result :output))))))))
+
+(defun app-server--password-child ()
+  "In the second Emacs: evaluate the form on standard input, print its value."
+  (let* ((text (with-temp-buffer (insert-file-contents "/dev/stdin") (buffer-string)))
+         (form (car (read-from-string (decode-coding-string (base64-decode-string text) 'utf-8)))))
+    ;; Only the two forms this file sends.
+    (unless (memq (car form) '(app-server-password-hash app-server-password-check))
+      (kill-emacs 2))
+    (setq app-server-password-rounds (nth 1 form))
+    (prin1 (apply (car form) (nthcdr 2 form)))))
+
+(defun app-server-password-hash-later (password function)
+  "Hash PASSWORD without holding up the server; FUNCTION gets the hash.
+For use inside `app-server-defer'."
+  (app-server--password-later (list 'app-server-password-hash app-server-password-rounds password)
+                              (app-server--guard function)))
+
+(defun app-server-password-check-later (password hash function)
+  "Check PASSWORD against HASH without holding up the server.
+FUNCTION gets t or nil.  For use inside `app-server-defer'."
+  (app-server--password-later (list 'app-server-password-check app-server-password-rounds password hash)
+                              (app-server--guard function)))
 
 ;;;; Answering later
 
@@ -356,13 +598,16 @@ studio's browser tab there are no programs, and the request fails."
 
 ;;;; Requests
 
-(defun app-server-respond (method path body &optional later headers)
+(defun app-server-respond (method path body &optional later headers upload)
   "Answer one request with `app-server-handle'.
 PATH may end in a query (?name=value&...).  HEADERS is the request's
 headers, an alist (NAME . VALUE) with the names in lower case.  The value
 is a vector [STATUS TEXT HEADERS]: the HTTP status, the response body
 (printed Lisp data) and the headers the handler asked for, a list of
-\(NAME . VALUE).
+\(NAME . VALUE).  When the handler answers with a file
+\(`app-server-send-file'), TEXT is (:file FILE :type TYPE :name NAME).
+UPLOAD is (:file FILE :size BYTES :type STRING) when the body went into a
+file (`app-server-upload-accept'); BODY is then empty.
 
 If the handler defers its answer (`app-server-defer'), the value is nil
 and LATER, a function of (STATUS TEXT HEADERS), is called when the answer
@@ -372,10 +617,10 @@ is there.  A host that passes no LATER cannot wait: the request fails."
          (app-server--request
           (app-server--request-create
            :parameters (and question (url-parse-query-string (substring path (1+ question))))
-           :headers headers))
+           :headers headers :upload upload))
          (path (if question (substring path 0 question) path))
          (answer (lambda (status data)
-                   (vector status (prin1-to-string data)
+                   (vector status (app-server--answer-body data)
                            (reverse (app-server--request-response-headers app-server--request))))))
     (condition-case err
         (if (fboundp 'app-server-handle)
@@ -398,9 +643,8 @@ Returns nil, or [STATUS TEXT HEADERS] if the function answered right away."
                    (unless answered
                      (setq answered t)
                      (when timeout (cancel-timer timeout))
-                     (let ((print-length nil) (print-level nil))
-                       (funcall later status (prin1-to-string data)
-                                (reverse (app-server--request-response-headers request)))))))
+                     (funcall later status (app-server--answer-body data)
+                              (reverse (app-server--request-response-headers request))))))
          (respond (lambda (data) (funcall answer 200 data)))
          (fail (lambda (message &optional status) (funcall answer (or status 400) message)))
          (now nil))
@@ -427,16 +671,23 @@ Returns nil, or [STATUS TEXT HEADERS] if the function answered right away."
 ;; the next server.
 
 (defun app-server--data-files ()
-  "The files of the data directory, without SQLite's transient journals."
+  "The files of the data directory and of files/ in it (kept uploads).
+Without SQLite's transient journals and uploads that are under way."
   (and (file-directory-p app-server-data-directory)
-       (seq-remove (lambda (file) (string-suffix-p "-journal" file))
-                   (directory-files app-server-data-directory t "\\`[^.]"))))
+       (seq-filter (lambda (file) (and (file-regular-p file) (not (string-suffix-p "-journal" file))))
+                   (append (directory-files app-server-data-directory t "\\`[^.]")
+                           (let ((kept (expand-file-name "files/" app-server-data-directory)))
+                             (and (file-directory-p kept) (directory-files kept t "\\`[^.]")))))))
+
+(defun app-server--data-name (file)
+  "FILE of the data directory as the studio names it: NAME or files/NAME."
+  (file-relative-name file app-server-data-directory))
 
 (defun app-server--signature ()
   "A string that changes when the data directory's files do."
   (mapconcat (lambda (file)
                (let ((attributes (file-attributes file)))
-                 (format "%s:%d:%s" (file-name-nondirectory file)
+                 (format "%s:%d:%s" (app-server--data-name file)
                          (file-attribute-size attributes)
                          (format-time-string "%s%N" (file-attribute-modification-time attributes)))))
              (app-server--data-files) "|"))
@@ -445,7 +696,7 @@ Returns nil, or [STATUS TEXT HEADERS] if the function answered right away."
   "The data directory: a vector of [FILE-NAME BASE64-CONTENT]."
   (vconcat
    (mapcar (lambda (file)
-             (vector (file-name-nondirectory file)
+             (vector (app-server--data-name file)
                      (with-temp-buffer
                        (set-buffer-multibyte nil)
                        (insert-file-contents-literally file)
@@ -457,8 +708,9 @@ Returns nil, or [STATUS TEXT HEADERS] if the function answered right away."
   (make-directory app-server-data-directory t)
   (let ((coding-system-for-write 'no-conversion))
     (mapc (lambda (entry)
-            (unless (string-match-p "\\`[A-Za-z0-9_.-]+\\'" (aref entry 0))
+            (unless (string-match-p "\\`\\(?:files/\\)?[A-Za-z0-9_-][A-Za-z0-9_.-]*\\'" (aref entry 0))
               (error "Not a data file name: %S" (aref entry 0)))
+            (make-directory (file-name-directory (expand-file-name (aref entry 0) app-server-data-directory)) t)
             (with-temp-file (expand-file-name (aref entry 0) app-server-data-directory)
               (set-buffer-multibyte nil)
               (insert (base64-decode-string (aref entry 1)))))
@@ -486,6 +738,9 @@ Returns nil, or [STATUS TEXT HEADERS] if the function answered right away."
 (defun app-server-use-tab-host ()
   "Let the page do the waiting (this Emacs lives in a browser tab)."
   (setq app-server--tab t
+        ;; This Emacs is some ten times slower than a native one and nobody
+        ;; else can reach it: hashes made here are for trying things out.
+        app-server-password-rounds 10000
         app-server-after-function
         (lambda (seconds function)
           (app-server--tab-command "timeout" (round (* 1000 seconds)) (lambda (_ok _value) (funcall function))))
@@ -507,22 +762,54 @@ Returns nil, or [STATUS TEXT HEADERS] if the function answered right away."
   "The response HEADERS, a list of (NAME . VALUE), as [[NAME VALUE] ...]."
   (vconcat (mapcar (lambda (header) (vector (car header) (cdr header))) headers)))
 
-(defun app-server-tab-request (method path body &optional headers)
+(defun app-server--tab-body (body)
+  "BODY of an answer for the page: text, or a file as (:base64 ... :type ...)."
+  (if (stringp body)
+      body
+    (list :base64 (with-temp-buffer
+                    (set-buffer-multibyte nil)
+                    (insert-file-contents-literally (plist-get body :file))
+                    (base64-encode-string (buffer-string) t))
+          :type (plist-get body :type) :name (plist-get body :name))))
+
+(defun app-server-tab-request (method path body &optional headers upload)
   "Answer a request of the page's application.
-HEADERS is a plist (:cookie \"...\" :content-type \"...\").  The value is
-\(:answer [STATUS TEXT HEADERS]) or, when the answer comes later,
+HEADERS is a plist (:cookie \"...\" :content-type \"...\").  UPLOAD, when the
+body is not text, is (:base64 STRING :type STRING).  The value is
+\(:answer [STATUS BODY HEADERS]) or, when the answer comes later,
 \(:pending ID); in both cases with the :commands and :finished of
-`app-server--tab-events'.  HEADERS in an answer is [[NAME VALUE] ...]."
+`app-server--tab-events'.  In an answer, HEADERS is [[NAME VALUE] ...] and
+BODY is text or (:base64 STRING :type STRING :name STRING) for a file."
   (let* ((id (cl-incf app-server--tab-next))
          (alist (cl-loop for (name value) on headers by #'cddr
                          collect (cons (downcase (substring (symbol-name name) 1)) value)))
-         (answer (app-server-respond
-                  method path body
-                  (lambda (status text headers)
-                    (push (list id status text (app-server--tab-headers headers)) app-server--tab-finished))
-                  alist)))
+         (bytes (and upload (base64-decode-string (plist-get upload :base64))))
+         (accept (and bytes (app-server-upload-accept method path (length bytes) alist)))
+         (file (and (eq accept t) (app-server-upload-file)))
+         (done (lambda () (when file (ignore-errors (delete-file file)))))
+         (answer
+          (cond
+           ((vectorp accept) accept)
+           ;; Not a file for server.el: text, if it is not too much of it.
+           ((and bytes (not accept) (> (length bytes) (* 1024 1024)))
+            (vector 413 "Content Too Large" nil))
+           (t
+            (when file
+              (let ((coding-system-for-write 'binary))
+                (write-region bytes nil file nil 'silent)))
+            (app-server-respond
+             method path (cond (file "") (bytes (decode-coding-string bytes 'utf-8)) (t body))
+             (lambda (status body headers)
+               (push (list id status (app-server--tab-body body) (app-server--tab-headers headers))
+                     app-server--tab-finished)
+               (funcall done))
+             alist
+             (and file (list :file file :size (length bytes)
+                             :type (or (plist-get upload :type) "application/octet-stream"))))))))
+    (when answer (funcall done))
     (append (if answer
-                (list :answer (vector (aref answer 0) (aref answer 1) (app-server--tab-headers (aref answer 2))))
+                (list :answer (vector (aref answer 0) (app-server--tab-body (aref answer 1))
+                                      (app-server--tab-headers (aref answer 2))))
               (list :pending id))
             (app-server--tab-events))))
 

@@ -13,3 +13,13 @@ example.com {
 	encode zstd gzip
 	reverse_proxy 127.0.0.1:8018
 }
+
+# Several cores: one Emacs uses one.  WORKERS=4 ./run.sh starts four, on
+# 8018 to 8021, and Caddy spreads the requests over them:
+#
+#	reverse_proxy 127.0.0.1:8018 127.0.0.1:8019 127.0.0.1:8020 127.0.0.1:8021 {
+#		lb_policy least_conn
+#	}
+#
+# Uploads need nothing here: Caddy passes a body of any size on as it
+# arrives, and server.el says what the application takes.

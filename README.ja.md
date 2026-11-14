@@ -29,7 +29,7 @@ Emacs Lisp の Web アプリケーションをブラウザの中で書き、リ�
 3. Emacs で `app.el` の文字列（たとえば `"Count: %d"`）を書き換え、`C-x C-s` で保存します。
 4. アプリケーションの表示が新しい文字列に変わります。カウンターの数はそのままです。
 
-プロジェクトは Emacs のファイルシステムの `/home/user/elisp-studio/app` にあります。ブラウザが保持するので、次に開いたときも残っています。新しいプロジェクトは `template/` から作られます。アドレスに `?example=stopwatch` や `?example=sqlite` を付けると、`examples/` の該当するディレクトリから作られます。すでにあるプロジェクトが置き換えられることはありません（最初からやり直すには、Emacs の中でこのディレクトリを削除します）。これは wasmacs のページが使っているのと同じ `/home/user` なので、wasmacs を直接開いたときにもプロジェクトが見えます。ファイルは次のとおりです。
+プロジェクトは Emacs のファイルシステムの `/home/user/elisp-studio/app` にあります。ブラウザが保持するので、次に開いたときも残っています。新しいプロジェクトは `template/` から作られます。アドレスに `?example=stopwatch`、`?example=sqlite`、`?example=upload` のいずれかを付けると、`examples/` の該当するディレクトリから作られます。すでにあるプロジェクトが置き換えられることはありません（最初からやり直すには、Emacs の中でこのディレクトリを削除します）。これは wasmacs のページが使っているのと同じ `/home/user` なので、wasmacs を直接開いたときにもプロジェクトが見えます。ファイルは次のとおりです。
 
 ```text
 index.html   ページ。<div id="app">、スタイルシート、<script type="text/emacs-lisp" src="app.el">
@@ -148,6 +148,59 @@ studio の中では、サーバーはブラウザのタブの中の3つ目の Em
 
 計算は「待ち」ではありません。実行中の Emacs Lisp と SQLite は、これまでどおり1つのスレッドを占有します。そのための手段が `app-server-run` です。
 
+### 閲覧者からのファイル
+
+リクエストの本文はハンドラが受け取るテキストで、上限は 1 MB です。ファイルは別扱いです。サーバーは、届いた分から順にディスクへ書き込み、ハンドラにはその名前を渡します。大きさに上限はありません。どのリクエストがファイルを運ぶのかは `server.el` が決めます。判断の材料はヘッダーだけで、ファイルを1バイトも受け取る前に決まります。
+
+```elisp
+(defun app-server-upload-p (method path size)
+  (and (equal path "/api/photos")
+       (app-visitor)                                   ; ログイン済みか（違えば 401 で断る）
+       (or (< size (* 200 1024 1024)) (app-server-refuse "Too large" 413))))
+
+('("POST" "/api/photos")
+ (let ((name (concat (app-server-token 8) ".jpg")))
+   (app-server-keep-upload name)                       ; これで (app-server-file name) になる
+   name))
+('("GET" "/api/photo")
+ (app-server-send-file (app-server-file (app-server-parameter "name")) :type "image/jpeg"))
+```
+
+`(app-server-upload)` は `(:file FILE :size BYTES :type STRING)` を返します。FILE は一時ファイルで、ハンドラが保存しなければ、応答とともに消えます。`(app-server-file NAME)` は、アプリケーションが保存しているファイル（`.data/files/`）のうちの1つです。NAME でそれ以外の場所を指すことはできません。`(app-server-files)` はその一覧を返し、`(app-server-send-file FILE :type :name)` はファイルを少しずつ読みながら応答として送ります。
+
+ページは、フォームではなく、ファイルそのものを本文として送ります。elisp-react では `react-fetch` のオプション1つです。ファイルは Lisp を通らず、ファイル入力からサーバーへ直接送られます。
+
+```elisp
+(input (:type "file" :ref "file"
+        :on-change (lambda (event) (react-set-state self :chosen (aref (plist-get event :files) 0)))))
+...
+(react-fetch "/api/photos" :method "POST" :file (react-ref self "file") :then ...)
+```
+
+[`examples/upload`](examples/upload) は、これで作ったファイル置き場です（[試す](https://modeverv.github.io/elisp-studio/?example=upload)）。計測では、300 MB が 1.2 秒で届き（毎秒 240 MB）、その間のサーバーのメモリ増加は 30 MB でした。同じファイルは 0.8 秒で戻り、チェックサムも一致しました。その間も、2人が低速でダウンロードしている間も、他のリクエストへの応答速度は変わりませんでした。studio のタブの中では、ファイルは base64 で運ばれてメモリに置かれます。上限は 32 MB で、アップロードを試すには十分です。
+
+### パスワード
+
+パスワードそのものは保存しません。保存するのは、計算に時間のかかるハッシュです。データベースが盗まれても、毎秒10億回の速さでパスワードを探されないようにするためです。`app-server.el` には、HMAC-SHA-256 による PBKDF2（60万回。OWASP がこの方式に示している回数）が入っています。Emacs 自身の `secure-hash` で書かれており、RFC 7914 のテストベクトルで確認しています。「時間がかかる」とは、1コアを2秒使うという意味です。そのため計算は2つ目の Emacs に任せ、サーバーは他のリクエストに応答し続けます。
+
+```elisp
+('("POST" "/api/login")
+ (let* ((sent (car (read-from-string body))) (name (car sent)) (password (cadr sent)))
+   (app-server-defer
+    (lambda (respond fail)
+      (app-server-password-check-later
+       password (app-stored-hash name)
+       (lambda (right)
+         (if (not right)
+             (funcall fail "Wrong name or password" 401)
+           (app-server-set-cookie "session" (app-new-session name))
+           (funcall respond t))))))))
+```
+
+`(app-server-password-hash-later PASSWORD FUNCTION)` は、保存するハッシュ（`"pbkdf2-sha256$600000$SALT$HASH"`）を作ります。どちらも、スクリプト用に `-later` なしの版があります。
+
+より強い方式を使っていない理由：探した範囲では、Emacs Lisp で書かれた bcrypt、scrypt、Argon2 は見つかりませんでした。見つかったのは、[kaesar-pbkdf2.el](https://github.com/mhayashi1120/Emacs-kaesar)（Lisp で書かれた PBKDF2、GPL）、[pg-el](https://github.com/emarsden/pg-el) の中の PBKDF2（GnuTLS 経由、PostgreSQL の SCRAM 認証用）、そしてモジュールとしてコンパイルが必要な libsodium のバインディング2つ（`crypto_box` だけを公開している [sodium.el](https://github.com/dakra/sodium.el) と、Rust で書かれた [esodium](https://codeberg.org/coopi/emacs-esodium)）です。PBKDF2 は `secure-hash` の上に30行で書け、ネイティブの Emacs でもブラウザの Emacs でも、何もインストールせずに動きます。上記の回数であれば認められている選択肢ですが、GPU による攻撃への強さでは Argon2 が上です。数文字のパスワードは、どの方式でも弱いままです。
+
 ### 公開する
 
 サーバーは 127.0.0.1 で待ち受け、暗号化しない HTTP を話します。アプリケーションをインターネットに出すときは、同じマシンでリバースプロキシを手前に置きます。HTTPS、HTTP/2、圧縮は Caddy か nginx が担当し、残りを Emacs が担当します。サーバーには、公開されるアドレスを伝えます。
@@ -168,10 +221,12 @@ PUBLIC_ORIGIN=https://example.com ./run.sh
 | 遅い、または黙っている接続 | 途中まで送られたリクエストは20秒、何も送らない接続は180秒で切ります（プロキシが接続を保つ時間より長くしてあります）。 |
 | ファイル | `ETag` を付けて送り、変わっていないファイルには `304` で応答します。`server.el`、`server/`、`.data/`、隠しファイル、およびシンボリックリンクでプロジェクトの外に出るものは送りません。 |
 | ログ | 標準エラー出力に、リクエストごとに1行（メソッド、パス、ステータス、ミリ秒）。 |
+| 複数のコア | `WORKERS=4 ./run.sh` で、4つの Emacs プロセスが4つのポートで起動し、プロキシがリクエストを振り分けます（方法は同梱の設定に書いてあります）。プロセスは `.data/` を共有します。SQLite は先行書き込みログ（WAL）に切り替わり、使用中のデータベースを待ちます。`app-server-write` はファイルを一度に置き換えます。ハンドラが Lisp の変数に持たせたものは、1つのワーカーしか知りません。セッションはデータベースに置いてください。ワーカーが1つ終了すると、スクリプトが全ワーカーを終了させ、systemd がまとめて起動し直します。 |
+| アップロード | Caddy は、どの大きさの本文も届いた分から転送します。nginx では、同梱ファイルの `client_max_body_size` が上限です。 |
 
-同梱の設定を使い、Caddy 2.11（HTTPS、HTTP/2）と nginx 1.30 を手前に置いて確認しました。ページ、ログイン、あとからの応答、上限までの本文、圧縮、`304` がすべて通ります。Caddy 経由の2万リクエストの負荷（毎秒2万2千件）で失敗はありませんでした。6分間の混合負荷（250万リクエスト、うち SQLite への挿入が37万件）はエラーなしで終わりました。2回目の計測では、ガベージコレクション後に生きている Lisp オブジェクトの数が、どの種類の負荷のあとも開始時と同じでした（Lisp 側のリークはありません）。プロセスのメモリは 59 MB から 105 MB まで増え、そこで止まりました。確認したのは15分間であり、数週間ではありません。systemd のユニットは実行していません。
+同梱の設定を使い、Caddy 2.11（HTTPS、HTTP/2）と nginx 1.30 を手前に置いて確認しました。ページ、ログイン、あとからの応答、圧縮、`304` がすべて通ります。300 MB のファイルは、どちらを経由しても、送って取り戻した内容が一致しました（送り先は4つのワーカーで、送ったあとは全ワーカーからそのファイルが見えます）。Caddy 経由の2万リクエストの負荷（毎秒2万2千件）で失敗はありませんでした。6分間の混合負荷（250万リクエスト、うち SQLite への挿入が37万件）はエラーなしで終わりました。2回目の計測では、ガベージコレクション後に生きている Lisp オブジェクトの数が、どの種類の負荷のあとも開始時と同じでした（Lisp 側のリークはありません）。プロセスのメモリは 59 MB から 105 MB まで増え、そこで止まりました。確認したのは15分間であり、数週間ではありません。systemd のユニットは実行していません。
 
-ないもの：複数プロセス（1つの Emacs は1コアしか使いません）、ファイルのアップロード、ストリーミング応答と WebSocket、パスワード専用のハッシュ（Emacs にあるのは SHA-2 で、bcrypt や Argon2 はありません。パスワードの確認は、Caddy の `basic_auth` などでプロキシに任せます）。このサーバーを本気で攻撃した人はまだいません。プロキシの後ろに置く数百行の Emacs Lisp であり、身内向けのアプリケーションのためのものです。
+ないもの：ストリーミング応答と WebSocket、フォームによるアップロード（`multipart/form-data`。ページはファイルそのものを送ります）、ファイルの一部分だけの送信（動画の途中からの再生はできません）。このサーバーを本気で攻撃した人はまだいません。プロキシの後ろに置く数百行の Emacs Lisp であり、身内向けのアプリケーションのためのものです。
 
 ### このサーバーの速さ
 
@@ -187,6 +242,8 @@ PUBLIC_ORIGIN=https://example.com ./run.sh
 | SQLite の `INSERT`（ディスクへの書き込み） | 2,810 | 2,180 |
 | 静的ファイル | 9,100 | 10,500 |
 | ブラウザが持っている静的ファイル（`304`） | | 16,200 |
+
+Caddy の後ろに複数のワーカーを置いた場合（`ab -k -c 40`）、計算をするハンドラは、ワーカー1つで毎秒2,630件、2つで5,320件、4つで10,500件と、コアの数だけ速くなります。SQLite の `SELECT` は17,000件から34,900件になります。4つのワーカーから同時に行った挿入は、すべて書き込まれました（15,000件中15,000件、毎秒約1万件）。
 
 比較のために、同じマシンの Node.js 26 では、小さな応答が毎秒21,200件（接続を維持すると66,800件）、`fib(20)` が11,000件でした。Emacs は、同時1接続では毎秒7,300件、同時100接続では毎秒20,400件です。同じ瞬間に百を大きく超える接続が届くと、OS がサーバーのために保持する待ち行列を超えます。手前にプロキシがあれば、その心配はありません。
 
@@ -254,6 +311,7 @@ npm run test:unit        # tar、zip、ネイティブの Emacs で配信した�
 npm run test:e2e         # headless Chrome で studio を操作
 npm run test:e2e:plain   # 同じテストを、GitHub Pages と同じく分離ヘッダーなしで実行
 npm run test:e2e:sqlite  # SQLite のサンプル。studio の中で動かし、ダウンロードして単独でも動かす
+npm run test:e2e:upload  # アップロードのサンプルを studio の中で動かす
 node tools/record-demo.mjs   # この README の画像を録画し直す（ffmpeg が必要）
 ```
 
@@ -266,5 +324,5 @@ node tools/record-demo.mjs   # この README の画像を録画し直す（ffmpe
 - 編集中の Emacs は、バッファを検査するときにプロジェクトのマクロを展開します。無限ループするマクロを書くと、エディタが固まります。
 - GitHub への push は、Emacs 自身のファイルシステム内のリポジトリに対してだけテストしています。companion 拡張を通る経路は wasmacs のもので、そちらでテストされています。
 - タブの中のサーバーは、データのディレクトリをメモリ上に持ちます。studio は、内容を変えたリクエストのあとでそれを IndexedDB にコピーします。小さなデータベースなら問題ありませんが、大きなものには向きません。
-- `run.sh` は 127.0.0.1 でだけ待ち受け、1つの Emacs が1コアで動きます。公開するには手前にリバースプロキシが必要です（あるものとないものは、上の「公開する」にあります）。
-- studio のタブの中では、`app-server-token` が使えるのは Emacs の `random` だけです。Cookie は、studio を再読み込みするまで保持されます。
+- `run.sh` は 127.0.0.1 でだけ待ち受けます。公開する場合や、複数のコアを使う場合は、手前にリバースプロキシが必要です（あるものとないものは、上の「公開する」にあります）。
+- studio のタブの中では、`app-server-token` が使えるのは Emacs の `random` だけで、パスワードのハッシュは60万回ではなく1万回、アップロードできるファイルは 32 MB までです。Cookie は、studio を再読み込みするまで保持されます。タブはアプリケーションを書く場所であり、他の人に向けて動かす場所ではありません。

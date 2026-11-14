@@ -2,7 +2,8 @@
 // that ran in the browser tab answers real HTTP requests.
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { createHash, pbkdf2Sync } from "node:crypto";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { Agent, createServer as createHttpServer, request as httpRequest } from "node:http";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -210,9 +211,17 @@ test("behind a reverse proxy: the public origin, forwarded headers, cookies, kep
      t)
     ('("GET" "/api/visitor") (list (app-server-header "x-forwarded-for") (app-server-header "X-Forwarded-Proto")))
     ('("POST" "/api/length") (length body))
+    ('("POST" "/api/hash")
+     (app-server-defer (lambda (respond _fail) (app-server-password-hash-later (car (read-from-string body)) respond))))
+    ('("POST" "/api/check")
+     (let* ((sent (car (read-from-string body))) (password (car sent)) (hash (cadr sent)))
+       (app-server-defer (lambda (respond fail)
+         (app-server-password-check-later
+          password hash (lambda (right) (if right (funcall respond t) (funcall fail "Wrong password" 401))))))))
     ('("POST" "/api/split") (app-server-set-header "X-Evil" (car (read-from-string body))) t)
     (_ (signal 'file-missing (list "No such API" path)))))
-(setq serve-project-request-timeout 1 serve-project-idle-timeout 2 serve-project-max-body 2000)
+(setq serve-project-request-timeout 1 serve-project-idle-timeout 2 serve-project-max-body 2000
+      app-server-password-rounds 300000)
 `);
   const server = await startServer(directory, { PUBLIC_ORIGIN: "https://app.example/" });
   // The proxy: one kept connection to the server, and the headers a proxy adds.
@@ -262,6 +271,21 @@ test("behind a reverse proxy: the public origin, forwarded headers, cookies, kep
     const direct = await fetch(`${server.origin}/api/login`, { method: "POST", body: '"ada"' });
     assert.doesNotMatch(direct.headers.get("set-cookie"), /Secure/);
 
+    // Passwords: a slow hash, made in a second Emacs while this one goes on answering.
+    const hashing = ask("/api/hash", { method: "POST", body: '"correct horse"', headers: ours });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const meanwhile = performance.now();
+    // (Asked directly: the proxy here has one connection, which the hashing holds.)
+    assert.equal((await fetch(`${server.origin}/api/visitor`)).status, 200);
+    const waited = performance.now() - meanwhile;
+    const [hashStatus, hashText] = await hashing;
+    assert.equal(hashStatus, 200);
+    assert.match(hashText, /^"pbkdf2-sha256\$300000\$[0-9a-f]{32}\$[0-9a-f]{64}"$/);
+    assert.ok(waited < 300, `a request during the hashing is not held up (${Math.round(waited)} ms)`);
+    const check = (password) => ask("/api/check", { method: "POST", body: `(${JSON.stringify(password)} ${hashText})`, headers: ours });
+    assert.deepEqual((await check("correct horse")).slice(0, 2), [200, "t"]);
+    assert.deepEqual((await check("correct horsf")).slice(0, 2), [401, '"Wrong password"']);
+
     // A header value cannot smuggle in another header.
     const split = await ask("/api/split", { method: "POST", body: JSON.stringify("a\r\nSet-Cookie: session=stolen"), headers: ours });
     assert.deepEqual([split[0], split[2].get("set-cookie")], [400, null]);
@@ -296,7 +320,9 @@ test("behind a reverse proxy: the public origin, forwarded headers, cookies, kep
     assert.match(expect.received, /\r\n\r\n5$/);
     // Refused, and the connection closed: too large, no length, too many headers, not HTTP.
     const refused = async (data, wait) => { const answer = await raw(server.port, data, wait); return [statuses(answer.received)[0], answer.closed]; };
-    assert.deepEqual(await refused("POST /api/length HTTP/1.1\r\nContent-Length: 2001\r\n\r\n"), [413, true]);
+    assert.deepEqual(await refused("POST /api/length HTTP/1.1\r\nContent-Length: 2001\r\n\r\n" + "x".repeat(2001)), [413, true]);
+    // (The server waits for the body it refused, so that the sender can read the answer; not forever.)
+    assert.deepEqual(await refused("POST /api/length HTTP/1.1\r\nContent-Length: 2001\r\n\r\n", 4000), [413, true]);
     assert.deepEqual(await refused("POST /api/length HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n12345\r\n0\r\n\r\n"), [411, true]);
     assert.deepEqual(await refused(`GET / HTTP/1.1\r\nX-Long: ${"x".repeat(17000)}`), [431, true]);
     assert.deepEqual(await refused("hello\r\n\r\n"), [400, true]);
@@ -316,8 +342,125 @@ test("behind a reverse proxy: the public origin, forwarded headers, cookies, kep
   }
 });
 
+test("the upload example takes large files into .data/files and sends them back", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "elisp-studio-upload-"));
+  await cp(join(root, "examples/upload"), directory, { recursive: true });
+  const server = await startServer(directory);
+  try {
+    const ask = async (path, options) => {
+      const response = await fetch(`${server.origin}${path}`, options);
+      return [response.status, await response.text()];
+    };
+    const uploads = () => readdir(join(directory, ".data/uploads")).catch(() => []);
+    // 40 MB that are not text: every byte value, in an order that does not repeat soon.
+    const big = Buffer.alloc(40 * 1024 * 1024);
+    for (let index = 0; index < big.length; index++) big[index] = (index * 31 + (index >> 8)) & 255;
+    const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
+    assert.deepEqual(await ask("/api/files"), [200, "(:files [])"]);
+    const [status, shelf] = await ask("/api/files?name=" + encodeURIComponent("My film (final).mp4"), { method: "POST", body: big });
+    assert.equal(status, 200);
+    assert.match(shelf, /^\(:files \[\(:name "My_film__final_\.mp4" :size 41943040 :at "\d{4}-\d\d-\d\d \d\d:\d\d"\)\]\)$/);
+    assert.equal(digest(await readFile(join(directory, ".data/files/My_film__final_.mp4"))), digest(big));
+    assert.deepEqual(await uploads(), []);                       // nothing is left of the arrival
+    {
+      const response = await fetch(`${server.origin}/api/file?name=My_film__final_.mp4`);
+      assert.equal(response.headers.get("content-length"), "41943040");
+      assert.equal(response.headers.get("content-disposition"), 'attachment; filename="My_film__final_.mp4"');
+      assert.equal(digest(Buffer.from(await response.arrayBuffer())), digest(big));
+    }
+    // The files are data of the server, not files of the site.
+    assert.equal((await ask("/.data/files/My_film__final_.mp4"))[0], 404);
+
+    // A name cannot point out of the shelf; it becomes a plain name on it.
+    await ask("/api/files?name=" + encodeURIComponent("../../server.el"), { method: "POST", body: "not the server" });
+    assert.equal(await readFile(join(directory, ".data/files/server.el"), "utf8"), "not the server");
+    assert.match(await readFile(join(directory, "server.el"), "utf8"), /a shelf of files/);
+    assert.equal((await ask("/api/files?name=...", { method: "POST", body: "x" }))[0], 400);
+    assert.equal((await ask("/api/file?name=nothing"))[0], 404);
+
+    // Only what server.el declared is taken as a file; other bodies stay text, a megabyte at most.
+    assert.equal((await ask("/api/files/remove", { method: "POST", body: big.subarray(0, 2 * 1024 * 1024) }))[0], 413);
+    assert.deepEqual(await ask("/api/files/remove", { method: "POST", body: '"server.el"' }),
+      [200, shelf]);
+    // server.el refuses before a byte of the file is taken.
+    const tooLarge = await raw(server.port, "POST /api/files?name=x HTTP/1.1\r\nContent-Length: 600000000\r\n\r\nabc");
+    assert.match(tooLarge.received, /^HTTP\/1\.1 413 [^]*Connection: close[^]*"That file is too large for the shelf"$/);
+    // Pages of other sites cannot upload.
+    assert.equal((await ask("/api/files?name=x", { method: "POST", body: big.subarray(0, 2 * 1024 * 1024), headers: { Origin: "https://evil.example" } }))[0], 413);
+    assert.equal((await ask("/api/files?name=x", { method: "POST", body: "small", headers: { Origin: "https://evil.example" } }))[0], 403);
+
+    // A visitor who leaves in the middle leaves nothing behind.
+    await raw(server.port, ["POST /api/files?name=half.bin HTTP/1.1\r\nContent-Length: 5000000\r\n\r\n" + "x".repeat(100000), 200], 300);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.deepEqual(await uploads(), []);
+    assert.equal((await ask("/api/file?name=half.bin"))[0], 404);
+    // A sender that waits for "100 Continue" gets it; the request after a file is answered too.
+    const two = await raw(server.port, ["POST /api/files?name=small.txt HTTP/1.1\r\nContent-Length: 5\r\nExpect: 100-continue\r\n\r\n", 150,
+                                        "12345GET /api/file?name=small.txt HTTP/1.1\r\nConnection: close\r\n\r\n"], 2000);
+    assert.deepEqual([...two.received.matchAll(/HTTP\/1\.1 (\d{3}) /g)].map((match) => match[1]), ["100", "200", "200"]);
+    assert.match(two.received, /\r\n\r\n12345$/);
+
+    // While a file arrives slowly, other requests are answered.
+    const slow = raw(server.port, ["POST /api/files?name=slow.bin HTTP/1.1\r\nContent-Length: 300000\r\nConnection: close\r\n\r\n",
+                                   ...Array.from({ length: 6 }, () => ["x".repeat(50000), 100]).flat()], 3000);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const started = performance.now();
+    assert.equal((await ask("/api/files"))[0], 200);
+    assert.ok(performance.now() - started < 200, "a request during an upload is not held up");
+    assert.match((await slow).received, /slow\.bin" :size 300000/);
+  } finally {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the password hash is PBKDF2-HMAC-SHA-256", () => {
+  const emacs = execFileSync(join(root, "tools/find-emacs.sh"), { encoding: "utf8" }).trim();
+  const lisp = (form) => execFileSync(emacs, ["--batch", "-Q", "-l", join(root, "lisp/app-server.el"), "--eval", `(princ ${form})`],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  // The test vectors of RFC 7914 (section 11) and the customary one for 4096 rounds.
+  assert.equal(lisp('(app-server--pbkdf2 "passwd" "salt" 1)'), "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc");
+  assert.equal(lisp('(app-server--pbkdf2 "Password" "NaCl" 80000)'), "4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56");
+  assert.equal(lisp('(app-server--pbkdf2 "password" "salt" 4096)'), "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a");
+  // A key longer than a block is hashed first.
+  assert.equal(lisp(`(app-server--pbkdf2 (make-string 65 ?a) "salt" 1)`),
+    pbkdf2Sync("a".repeat(65), "salt", 1, 32, "sha256").toString("hex"));
+  assert.equal(lisp('(let ((app-server-password-rounds 1000)) (list (app-server-password-check "pässword" (app-server-password-hash "pässword")) (app-server-password-check "x" "pbkdf2-sha256$1000$00$00") (app-server-password-check "x" nil)))'),
+    "(t nil nil)");
+});
+
+test("WORKERS: several Emacs processes share one project", { skip: !sqliteAvailable() && "this Emacs has no SQLite" }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "elisp-studio-workers-"));
+  await cp(join(root, "examples/sqlite"), directory, { recursive: true });
+  const server = await startServer(directory, { WORKERS: "2" });
+  const second = `http://127.0.0.1:${server.port + 1}`;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try { await fetch(`${second}/`); break; } catch (error) {
+        if (attempt > 100) throw new Error("the second worker did not start");
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+    // Both write to the same database at once; nothing is lost, nobody is turned away.
+    const add = (origin, title) => fetch(`${origin}/api/books`, { method: "POST", body: JSON.stringify(title) }).then((response) => response.status);
+    const statuses = await Promise.all(Array.from({ length: 200 }, (_, index) => add(index % 2 ? second : server.origin, `Book ${index}`)));
+    assert.deepEqual([...new Set(statuses)], [200]);
+    for (const origin of [server.origin, second]) {
+      assert.match(await (await fetch(`${origin}/api/books`)).text(), /:total 200 /);
+    }
+    assert.equal(existsSync(join(directory, ".data/app.db-wal")), true);
+  } finally {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+  // Stopping the script stops every worker.
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await assert.rejects(fetch(second));
+});
+
 // Does the native Emacs that the scripts find have SQLite?
-const emacsHasSqlite = (() => {
+function sqliteAvailable() {
   try {
     const emacs = execFileSync(join(root, "tools/find-emacs.sh"), { encoding: "utf8" }).trim();
     return execFileSync(emacs, ["--batch", "-Q", "--eval", "(princ (and (fboundp 'sqlite-available-p) (sqlite-available-p)))"],
@@ -325,7 +468,8 @@ const emacsHasSqlite = (() => {
   } catch (_) {
     return false;
   }
-})();
+}
+const emacsHasSqlite = sqliteAvailable();
 
 test("the SQLite example keeps its books in a database file", { skip: !emacsHasSqlite && "this Emacs has no SQLite" }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "elisp-studio-sqlite-"));

@@ -12,6 +12,8 @@ After=network.target
 User=app
 WorkingDirectory=/srv/app
 Environment=PUBLIC_ORIGIN=https://example.com
+# Several cores (and the proxy's list of upstreams to match):
+# Environment=WORKERS=4
 ExecStart=/srv/app/run.sh 8018
 Restart=always
 RestartSec=1

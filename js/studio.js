@@ -25,6 +25,8 @@ const TEMPLATE_FILES = ["index.html", "app.el", "style.css"];
 const TEMPLATE_OPTIONAL_FILES = ["server.el"];
 const SERVER_FILE = "server.el";
 const SERVER_DATA_KEY = "server-data";
+const TAB_UPLOAD_LIMIT = 32 * 1024 * 1024;
+const UPLOAD_TIMEOUT_MS = 60000;
 const DEFERRED_TIMEOUT_MS = 30000;   // as app-server-deferred-timeout
 const SERVER_TIMEOUT_MS = 8000;
 const LOAD_TIMEOUT_MS = 8000;
@@ -269,6 +271,12 @@ function keepCookie(text) {
   else cookies.set(pair.slice(0, equals), pair.slice(equals + 1));
 }
 
+function toBase64(bytes) {
+  let text = "";
+  for (let start = 0; start < bytes.length; start += 0x8000) text += String.fromCharCode(...bytes.subarray(start, start + 0x8000));
+  return btoa(text);
+}
+
 // The headers of a request, as the plist the server takes: { cookie, ... }.
 function requestHeaders(given) {
   const headers = {};
@@ -285,21 +293,32 @@ async function applicationFetch(url, options = {}) {
   }
   // The answer as a Response.  Set-Cookie is not a header a page may see:
   // the cookies go to the jar that stands in for the browser's.
+  // VALUE is text, or { base64, type, name } when server.el answered with a file.
   const lisp = (status, value, headers = []) => {
-    const response = new Headers({ "Content-Type": "application/x-emacs-lisp; charset=utf-8" });
+    const file = typeof value === "string" ? null : value;
+    const response = new Headers({ "Content-Type": file ? file.type : "application/x-emacs-lisp; charset=utf-8" });
+    if (file?.name) response.set("Content-Disposition", `attachment; filename="${file.name.replace(/[^A-Za-z0-9._ -]/g, "_")}"`);
     for (const [name, text] of headers) {
       if (name.toLowerCase() === "set-cookie") keepCookie(text);
       else response.append(name, text);
     }
-    return new Response(value, { status, headers: response });
+    return new Response(file ? Uint8Array.from(atob(file.base64), (c) => c.charCodeAt(0)) : value, { status, headers: response });
   };
   if (!server) return lisp(404, '"This application has no server.el"');
   try {
     const current = server;
+    // A body that is not text (a File the visitor chose) travels as base64:
+    // fine for trying an upload out, not for large files.
+    const body = options.body ?? "";
+    const binary = typeof body === "string" ? null : new Uint8Array(await new Response(body).arrayBuffer());
+    if (binary && binary.length > TAB_UPLOAD_LIMIT) return lisp(413, '"The studio takes uploads of up to 32 MB; a native Emacs takes more"');
+    const sent = requestHeaders(options.headers);
+    if (binary && !sent["content-type"] && body.type) sent["content-type"] = body.type;
     const result = await withTimeout(
-      current.emacs.call("app-server-tab-request", options.method || "GET", target.pathname + target.search, options.body ?? "",
-        requestHeaders(options.headers)),
-      SERVER_TIMEOUT_MS, "the server");
+      current.emacs.call("app-server-tab-request", options.method || "GET", target.pathname + target.search,
+        binary ? "" : body, sent,
+        binary ? { base64: toBase64(binary), type: sent["content-type"] || "application/octet-stream" } : null),
+      binary ? UPLOAD_TIMEOUT_MS : SERVER_TIMEOUT_MS, "the server");
     // An answer that comes later (app-server-defer) arrives with the
     // events of some later call.
     const later = result.answer ? null : new Promise((resolve) => {
@@ -413,6 +432,22 @@ async function startPreview(project, why) {
       const text = `${error?.symbol ? `${error.symbol}: ` : ""}${error?.message || error}`;
       showError(text);
       report("error", "error in the application", text);
+    });
+    // A link to /api/ (a download that server.el answers) cannot leave this
+    // frame as a navigation: ask the server here and hand over the file.
+    frame.contentDocument.addEventListener("click", async (event) => {
+      const link = event.target.closest?.("a[href]");
+      const href = link?.getAttribute("href") || "";
+      if (!href.startsWith("/api/")) return;
+      event.preventDefault();
+      const response = await applicationFetch(href);
+      if (!response.ok) return showError(`${href}: ${await response.text()}`);
+      const save = document.createElement("a");
+      save.href = URL.createObjectURL(await response.blob());
+      save.download = /filename="([^"]+)"/.exec(response.headers.get("Content-Disposition") || "")?.[1]
+        || link.getAttribute("download") || "download";
+      save.click();
+      setTimeout(() => URL.revokeObjectURL(save.href), 60000);
     });
     const app = await withTimeout(frame.contentWindow.__studio.start({
       wasmacs: WASMACS.href,
