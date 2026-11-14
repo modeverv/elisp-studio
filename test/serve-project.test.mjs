@@ -2,7 +2,7 @@
 // that ran in the browser tab answers real HTTP requests.
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { Agent, createServer as createHttpServer, request as httpRequest } from "node:http";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -60,6 +60,17 @@ test("the template project runs under a native Emacs: files, server.el, kept dat
     assert.equal((await text("/app.el"))[1], await readFile(join(directory, "app.el"), "utf8"));
     assert.equal((await text("/server.el"))[0], 404);          // not for download
     assert.equal((await text("/.data/messages.eld"))[0], 404);  // nor the data
+    // Nothing outside the project: not by "..", not by a symbolic link.
+    await writeFile(join(directory, "..", "elisp-studio-outside.txt"), "outside");
+    await symlink(join(directory, "..", "elisp-studio-outside.txt"), join(directory, "link.txt"));
+    await symlink(join(directory, ".."), join(directory, "up"));
+    await symlink(join(directory, "app.el"), join(directory, "inside.el"));
+    assert.equal((await raw(server.port, "GET /../elisp-studio-outside.txt HTTP/1.0\r\n\r\n")).received.slice(9, 12), "404");
+    assert.equal((await raw(server.port, "GET /%2e%2e/elisp-studio-outside.txt HTTP/1.0\r\n\r\n")).received.slice(9, 12), "404");
+    assert.equal((await text("/link.txt"))[0], 404);
+    assert.equal((await text("/up/elisp-studio-outside.txt"))[0], 404);
+    assert.equal((await text("/inside.el"))[0], 200);
+    await rm(join(directory, "..", "elisp-studio-outside.txt"));
 
     // A burst: many requests at once are all answered (Emacs's default
     // queue of five waiting connections would turn some of them away).
@@ -363,6 +374,7 @@ test("a downloaded project runs itself: run.sh, and with vendor/ its own copy of
                                 ["server/serve-project.el", "tools/serve-project.el"], ["server/app-server.el", "lisp/app-server.el"]]) {
     await cp(join(root, source), join(directory, path));
   }
+  await cp(join(root, "tools/project/deploy"), join(directory, "server/deploy"), { recursive: true });
   const start = async () => {
     const port = await freePort();
     const child = spawn(join(directory, "run.sh"), [String(port)], { stdio: "ignore" });
@@ -382,6 +394,7 @@ test("a downloaded project runs itself: run.sh, and with vendor/ its own copy of
     assert.match(page, /https:\/\/modeverv\.github\.io\/elisp-react\/js\/elisp-react\.js/);   // the public Emacs
     assert.equal((await fetch(`${server.origin}/server/serve-project.el`)).status, 404);
     assert.equal((await fetch(`${server.origin}/server.el`)).status, 404);
+    assert.equal((await fetch(`${server.origin}/server/deploy/Caddyfile`)).status, 404);
     await server.stop();
 
     // With a copy in vendor/ (what fetch-emacs.sh makes) the page is told to use it.

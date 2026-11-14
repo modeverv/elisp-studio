@@ -78,7 +78,24 @@ A project with a `server.el` has a server. The file defines one function:
     ...))
 ```
 
-It returns Lisp data, which the page gets printed and reads back; an error it signals is the response. `(app-server-parameter "name")` is the value of `?name=...` in the request.
+It returns Lisp data, which the page gets printed and reads back; an error it signals is the response. Around the three arguments:
+
+- `(app-server-parameter "name")`: the value of `?name=...` in the request.
+- `(app-server-header "name")`, `(app-server-cookie "name")`: what came with the request.
+- `(app-server-set-header "Name" "value")`, `(app-server-set-cookie "name" "value" :max-age 3600)`, `(app-server-delete-cookie "name")`: what goes with the answer. A cookie is hidden from the page's scripts, `SameSite=Lax`, and `Secure` when the visitor came over HTTPS, unless told otherwise.
+- `(app-server-refuse "Sign in first" 401)`: answer with that message and status.
+- `(app-server-token)`: a random name nobody can guess, for a session.
+
+Signing in is those put together:
+
+```elisp
+('("POST" "/api/login")
+ (let ((session (app-server-token)))
+   (sqlite-execute (app-server-database) "INSERT INTO sessions (name, visitor) VALUES (?, ?)"
+                   (list session (app-check-password body)))
+   (app-server-set-cookie "session" session :max-age (* 30 24 3600))
+   t))
+```
 
 The server can keep data in two ways:
 
@@ -131,28 +148,54 @@ There are three things to wait for, none of which blocks:
 
 Computing is not waiting: Emacs Lisp that runs, and SQLite, still hold the one thread. That is what `app-server-run` is for.
 
+### Publishing it
+
+The server listens on 127.0.0.1 and speaks plain HTTP. To put the application on the internet, a reverse proxy on the same machine goes in front of it: Caddy or nginx does HTTPS, HTTP/2 and compression, Emacs does the rest. The server is told the address it is published under:
+
+```sh
+PUBLIC_ORIGIN=https://example.com ./run.sh
+```
+
+The download brings the configurations in `server/deploy/`: a `Caddyfile` (four lines), an `nginx.conf`, and a systemd unit that keeps `run.sh` running. What the server does for that setup:
+
+| | |
+|---|---|
+| The public origin | Requests to `/api/` from pages of other sites are refused; `PUBLIC_ORIGIN` says which pages are the application's own. |
+| Who the visitor is | `(app-server-header "x-forwarded-for")` and `"x-forwarded-proto"` are the proxy's word, which can be believed because only this machine reaches the server. Both shipped configurations overwrite what a visitor claims in those headers. |
+| Cookies, sign-in | See above. Requests from other sites cannot use them: the origin check, and `SameSite=Lax`. |
+| Kept connections | The proxy's connections stay open between requests, and requests sent ahead are answered in order. |
+| Limits | A body of at most 1 MB (`serve-project-max-body`), 16 KB of headers; a body without a stated length is refused (nginx and Caddy state it). |
+| Slow or silent visitors | Half a request is given 20 seconds, an idle connection 180 (longer than the proxies keep theirs). |
+| Files | Sent with an `ETag`; an unchanged file is answered with `304`. `server.el`, `server/`, `.data/` and hidden files are never sent, nor anything a symbolic link leads to outside the project. |
+| Log | One line per request on standard error: method, path, status, milliseconds. |
+
+Tried with Caddy 2.11 (HTTPS with HTTP/2) and nginx 1.30 in front, with the shipped configurations: pages, sign-in, deferred answers, uploads up to the limit, compression and `304` all pass through, and a load of 20,000 requests through Caddy (22,000 per second) had no failures. Six minutes of mixed load (2.5 million requests, among them 370,000 SQLite inserts) ended without an error. In a second run the number of live Lisp objects after a collection was the same after each kind of load as at the start (no leak in Lisp), while the process grew from 59 MB to 105 MB and stayed there. That is fifteen minutes, not weeks. The systemd unit has not been run.
+
+What is not there: more than one process (one Emacs uses one core), uploads of files, streaming answers and WebSockets, and password hashing made for the purpose (Emacs has SHA-2, no bcrypt or Argon2; to check passwords, let the proxy do it, with Caddy's `basic_auth` for instance). Nobody has attacked this server in earnest: it is a few hundred lines of Emacs Lisp behind a proxy, for applications among friends.
+
 ### How fast is that server?
 
-It is one Emacs with one thread, working like Node.js: connections wait in the operating system, Emacs takes one request, runs the handler to its end, answers, takes the next. `server.el` is byte-compiled when the server starts. Measured with ApacheBench on an Apple M4 Max, Emacs 31.1, 10 connections at a time (`ab -n 5000 -c 10`):
+It is one Emacs with one thread, working like Node.js: connections wait in the operating system, Emacs takes one request, runs the handler to its end, answers, takes the next. `server.el` and the server itself are byte-compiled when the server starts. Measured with ApacheBench on an Apple M4 Max, Emacs 31.1, 10 connections at a time (`ab -n 10000 -c 10`; with `-k` the connections are kept, as a proxy keeps them):
 
-| Request | Requests per second |
-|---|---|
-| a handler that returns a small plist | 16,400 |
-| a POST whose body is read and returned | 16,400 |
-| a handler that computes `(fib 20)` (22,000 function calls) | 2,560 |
-| `app-server-read` (a file is read) | 14,300 |
-| an SQLite `SELECT` | 13,700 |
-| an SQLite `INSERT` (written to disk) | 2,590 |
-| a static file | 2,750 |
+| Request | A new connection each | Kept connections |
+|---|---|---|
+| a handler that returns a small plist | 19,700 | 28,000 |
+| a POST whose body is read and returned | 21,200 | 27,300 |
+| a handler that computes `(fib 20)` (22,000 function calls) | 2,720 | 2,790 |
+| `app-server-read` (a file is read) | 19,800 | 23,100 |
+| an SQLite `SELECT` | 20,500 | 21,900 |
+| an SQLite `INSERT` (written to disk) | 2,810 | 2,180 |
+| a static file | 9,100 | 10,500 |
+| a static file the browser has (`304`) | | 16,200 |
 
-With one connection at a time it is 6,700 per second (ApacheBench opens a new connection for each request), with 100 at a time 17,000. More than about a hundred connections arriving in the same instant exceed the queue the operating system keeps for the server.
+For comparison, Node.js 26 on the same machine: the small answer 21,200 (kept connections: 66,800), `fib(20)` 11,000. With one connection at a time Emacs does 7,300 per second, with 100 at a time 20,400. More than about a hundred connections arriving in the same instant exceed the queue the operating system keeps for the server; a proxy in front spares it that.
 
 A handler that takes long holds up everyone behind it, as in any single-threaded event loop, unless it answers later. Handlers that need 100 ms of something else, measured the same way:
 
 | Handler | 10 at a time | 50 | 100 |
 |---|---|---|---|
 | runs a program and waits for it (`call-process`) | 9 per second | 9 (half wait over 3 s) | |
-| runs it with `app-server-run`, answers later | 84 | 431 | 834 |
+| runs it with `app-server-run`, answers later | 86 | 426 | 840 |
 | waits inside Emacs (`sleep-for`) | 89 | | 97% turned away (503) |
 | `app-server-after`, answers later | 90 | | 869 |
 | asks another server and waits (`url-retrieve-synchronously`) | 81 | | 98% turned away (503) |
@@ -163,9 +206,9 @@ Answered later, the rate is simply connections ÷ 0.1 s: nobody waits for anybod
 | Meanwhile | The plain handler | Slowest request |
 |---|---|---|
 | the program is waited for | 184 per second | 5.4 s |
-| the program is run with `app-server-run` | 8,480 per second | 15 ms |
+| the program is run with `app-server-run` | 9,400 per second | 6 ms |
 
-Deferring itself costs little: a handler that defers and answers at once does 9,600 per second (15,000 without). The waits inside Emacs deserve a note: `sleep-for` and `url-retrieve-synchronously` let the next request in while they wait, which then runs *inside* the waiting one. Ten of those are fine; a hundred used to exhaust the stack and end the server, so beyond 32 it now turns requests away with a 503.
+Deferring itself costs nothing to speak of: a handler that defers and answers at once does 19,700 per second. The waits inside Emacs deserve a note: `sleep-for` and `url-retrieve-synchronously` let the next request in while they wait, which then runs *inside* the waiting one. Ten of those are fine; a hundred used to exhaust the stack and end the server, so beyond 32 it now turns requests away with a 503.
 
 ## Getting the project out
 
@@ -223,4 +266,5 @@ node tools/record-demo.mjs   # record the pictures of this README again (needs f
 - The editing Emacs expands the project's macros when it checks a buffer. A macro that loops forever would hang the editor.
 - Pushing to GitHub has been tested only against a repository inside Emacs's own filesystem; the path through the companion extension is wasmacs's and is tested there.
 - The server in the tab keeps its data directory in memory and the studio copies it to IndexedDB after a request that changed it: fine for a small database, not for a large one.
-- `run.sh` listens on 127.0.0.1 and is a single Emacs answering one request after the other.
+- `run.sh` listens on 127.0.0.1 and is a single Emacs on one core; publishing it takes a reverse proxy in front ("Publishing it" above says what is and is not there).
+- In the studio's tab, `app-server-token` has only Emacs's `random` to draw on, and cookies last until the studio is reloaded.

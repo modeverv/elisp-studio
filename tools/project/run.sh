@@ -2,6 +2,9 @@
 # Run this application: GNU Emacs is its web server.
 #
 #   ./run.sh [PORT]        then open http://127.0.0.1:PORT/  (default 8018)
+#   PUBLIC_ORIGIN=https://example.com ./run.sh
+#                          behind a reverse proxy that publishes it there
+#                          (server/deploy/ has configurations)
 #
 # Needs bash and a native GNU Emacs (29 or later; with SQLite support if
 # server.el uses a database).  Emacs serves the files of this directory and

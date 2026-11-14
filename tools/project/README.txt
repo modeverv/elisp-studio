@@ -6,6 +6,7 @@ An application written in Emacs Lisp, made with elisp-studio
   run.sh                          run it: GNU Emacs is the web server
   fetch-emacs.sh                  optional: keep the browser's Emacs here too
   server/                         what run.sh loads into Emacs
+  server/deploy/                  for publishing: Caddy, nginx, systemd
 
 To run it you need bash and GNU Emacs 29 or later:
 
@@ -28,5 +29,11 @@ from here instead, so that nothing needs the internet:
 Without a server.el the application is a static site: index.html, app.el
 and style.css on any web server are enough.
 
-The server listens on 127.0.0.1 only.  To put it on a network, place a
-reverse proxy in front of it.
+The server listens on 127.0.0.1 only.  To publish the application, put a
+reverse proxy on the same machine in front of it, which does HTTPS, and
+tell the server the address it is published under:
+
+  PUBLIC_ORIGIN=https://example.com ./run.sh
+
+server/deploy/ has what that takes: a Caddyfile, an nginx.conf, and a
+systemd unit that keeps run.sh running.

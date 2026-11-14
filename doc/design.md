@@ -92,6 +92,17 @@ What can be waited for is behind three variables, because the hosts differ:
 
 Emacs's own waits (`sleep-for`, `accept-process-output`, `url-retrieve-synchronously`) run other process filters while they wait, so a handler that uses them is re-entered by the next request. `serve-project.el` counts that nesting and answers 503 beyond 32, because a hundred nested handlers exhausted the stack and ended the server.
 
+### Behind a reverse proxy
+
+`serve-project.el` stays on 127.0.0.1 and plain HTTP/1.1; what faces the internet is Caddy or nginx on the same machine (configurations in `tools/project/deploy/`, shipped in the download as `server/deploy/`, which is not served). The pieces that exist for that setup:
+
+- The origin check takes `PUBLIC_ORIGIN` (`serve-project-origins`) besides the server's own address.
+- A connection is a small state machine in the process's plist: `:input` (bytes not yet consumed), `:busy` (a request is being answered, perhaps later), `:keep`, `:head`, `:since`. `serve-project--next` takes one complete request off `:input`; `serve-project--respond` sends, and either closes or clears `:busy` and schedules `--next` for what is already buffered. So requests on one connection are answered in order, also when an answer is deferred.
+- One timer (`serve-project--sweep`) closes connections that wait too long, rather than a timer per connection: 408 for half a request, a silent close for an idle one. The idle time is longer than the proxies' so that they, not the server, close idle connections (the other order loses requests).
+- Request and response headers travel in `app-server--request`, a struct that is dynamically bound while the handler runs and captured by `app-server--guard` for what runs later. `app-server-respond` returns `[STATUS TEXT HEADERS]`. Header values are checked for control characters before they are sent.
+- In the tab there is no browser cookie handling between the application and the server (the request never reaches the network stack), so `js/studio.js` keeps a jar: `Set-Cookie` of an answer goes in, a `cookie` header goes out with the next request.
+- Speed: the server's own functions are loaded as source and then byte-compiled in memory (`serve-project--compile`), `gc-cons-threshold` is 16 MB in `serve-project-run`, and a file's true name is asked for only when a symbolic link is on its path. Together: 14,400 to 19,700 requests per second for a small answer, 2,750 to 9,100 for a file, and the 9 ms tail (a collection every hundred requests or so) is gone.
+
 ### SQLite
 
 `app-server-database` opens `NAME.db` in the data directory with Emacs's `sqlite-open` and keeps the connection. That is all there is to it on both hosts: natively the file is on disk; in the tab it is in the in-memory filesystem and is persisted as described above (a 12 KB database is 16 KB of base64 per changing request, so this is for small data). wasmacs links SQLite into the browser's Emacs without the write-ahead log, so a database is one file plus a transient `-journal`, which the dump leaves out.

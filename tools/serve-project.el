@@ -81,16 +81,35 @@ so that it is the proxy that closes them.")
     ("el" . "text/plain; charset=utf-8") ("png" . "image/png") ("svg" . "image/svg+xml")
     ("wasm" . "application/wasm") ("mjs" . "text/javascript")))
 
+(defvar serve-project--root nil "The project directory, expanded, with a final slash.")
+(defvar serve-project--true-root nil "`serve-project--root' with symbolic links resolved.")
+
+(defun serve-project--inside-p (file)
+  "Non-nil if FILE, a name below the project directory, is a file in it.
+A symbolic link in the project may not lead out of it.  (Asking for the
+true name of every file would cost more than reading it, so that is done
+only for names with a link in them.)"
+  (let ((directory serve-project--root)
+        (link nil))
+    (dolist (part (split-string (substring file (length serve-project--root)) "/" t))
+      (setq directory (concat directory part))
+      (when (file-symlink-p directory) (setq link t))
+      (setq directory (concat directory "/")))
+    (or (not link)
+        (string-prefix-p serve-project--true-root (file-truename file)))))
+
 (defun serve-project--file (path)
   "The file of the project that the URL PATH names, or nil."
-  (let* ((root (file-name-as-directory (expand-file-name serve-project-directory)))
+  (let* ((root serve-project--root)
          (file (expand-file-name (substring (decode-coding-string (url-unhex-string path) 'utf-8) 1) root)))
     (when (file-directory-p file) (setq file (expand-file-name "index.html" file)))
-    (and (string-prefix-p (file-truename root) (file-truename file))
-         (not (string-match-p "\\(?:\\`\\|/\\)\\." (file-relative-name file root)))
-         ;; The server's own program is not for download.
-         (not (string-match-p "\\`server\\(?:\\.el\\|/\\)" (file-relative-name file root)))
+    (and (string-prefix-p root file)
+         (let ((relative (substring file (length root))))
+           (and (not (string-match-p "\\(?:\\`\\|/\\)\\." relative))
+                ;; The server's own program is not for download.
+                (not (string-match-p "\\`server\\(?:\\.el\\|/\\)" relative))))
          (file-regular-p file)
+         (serve-project--inside-p file)
          file)))
 
 (defun serve-project--respond (process status type body &optional headers close)
@@ -307,6 +326,8 @@ many."
   (interactive)
   (when (process-live-p serve-project--process) (delete-process serve-project--process))
   (setq serve-project-directory (file-name-as-directory (expand-file-name serve-project-directory))
+        serve-project--root serve-project-directory
+        serve-project--true-root (file-name-as-directory (file-truename serve-project-directory))
         app-server-data-directory (expand-file-name ".data/" serve-project-directory))
   (let ((server (expand-file-name "server.el" serve-project-directory))
         (compiled (expand-file-name "server.elc" app-server-data-directory)))

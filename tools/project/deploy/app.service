@@ -1,0 +1,27 @@
+# systemd: keep the application running.  Adjust the paths, the user and the
+# origin, copy to /etc/systemd/system/app.service, then:
+#
+#   systemctl daemon-reload && systemctl enable --now app
+#   journalctl -u app -f        one line per request
+
+[Unit]
+Description=A web application whose server is GNU Emacs
+After=network.target
+
+[Service]
+User=app
+WorkingDirectory=/srv/app
+Environment=PUBLIC_ORIGIN=https://example.com
+ExecStart=/srv/app/run.sh 8018
+Restart=always
+RestartSec=1
+
+# The server needs to write its data, and nothing else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/srv/app/.data
+
+[Install]
+WantedBy=multi-user.target

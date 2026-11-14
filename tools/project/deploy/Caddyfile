@@ -1,0 +1,15 @@
+# Caddy in front of this application.  Caddy does HTTPS (it gets the
+# certificate itself) and compression; Emacs, on the same machine, does the
+# rest.  Replace example.com, then:
+#
+#   PUBLIC_ORIGIN=https://example.com ./run.sh
+#   caddy run --config server/deploy/Caddyfile
+#
+# Caddy tells the application who the visitor is (X-Forwarded-For,
+# X-Forwarded-Proto) and does not pass on what a visitor claims in those
+# headers.
+
+example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8018
+}

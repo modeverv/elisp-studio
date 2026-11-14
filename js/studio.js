@@ -576,6 +576,9 @@ const RUNTIME_FILES = [
   ["README.txt", "tools/project/README.txt", false],
   ["server/serve-project.el", "tools/serve-project.el", false],
   ["server/app-server.el", "lisp/app-server.el", false],
+  ["server/deploy/Caddyfile", "tools/project/deploy/Caddyfile", false],
+  ["server/deploy/nginx.conf", "tools/project/deploy/nginx.conf", false],
+  ["server/deploy/app.service", "tools/project/deploy/app.service", false],
 ];
 
 async function projectZip() {
