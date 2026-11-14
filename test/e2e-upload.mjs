@@ -3,6 +3,7 @@
 // after a reload.
 //
 //   node test/e2e-upload.mjs
+//   E2E_SITE=https://modeverv.github.io node test/e2e-upload.mjs    the published site
 //
 // Needs ../wasmacs/docs (built) and ../elisp-react.  The same server.el
 // under a native Emacs, with large files, is in test/serve-project.test.mjs.
@@ -15,7 +16,11 @@ import { serve } from "../tools/serve.mjs";
 import { CdpClient, chromePath, devToolsUrl, evaluate, waitUntil } from "./lib/cdp.mjs";
 
 const pass = (message) => console.log(`PASS ${message}`);
-const { server, origin } = await serve();
+let server = null;
+let origin = (process.env.E2E_SITE || "").replace(/\/$/, "");
+if (!origin) ({ server, origin } = await serve());
+// The published site sends 150 MB of Emacs the first time.
+const patience = process.env.E2E_SITE ? 600_000 : 90_000;
 const workDir = await mkdtemp(join(tmpdir(), "elisp-studio-upload-"));
 let chrome = null, client = null;
 try {
@@ -29,7 +34,7 @@ try {
   await client.send("Page.enable", {}, sessionId);
   await client.send("Runtime.enable", {}, sessionId);
   const js = (expression) => evaluate(client, sessionId, expression);
-  const until = (expression, label) => waitUntil(() => js(expression).catch(() => false), label, 90_000);
+  const until = (expression, label) => waitUntil(() => js(expression).catch(() => false), label, patience);
   const frame = "window.document.querySelector('#preview')?.contentDocument";
   const page = (expression) => js(`(() => { const document = ${frame}; return ${expression}; })()`);
   const pageUntil = (expression, label) => until(`(() => { const document = ${frame}; return Boolean(document) && (${expression}); })()`, label);
