@@ -117,12 +117,40 @@ try {
   assert.match(warningScreen, /\/home\/user\/elisp-studio\/app\/app\.el:\d+:\d+: Warning/);
   assert.match(warningScreen, /\*elisp-studio\*/);
   assert.match(await status(), /app\.el updated/);
+  // The same warning is a Flymake diagnostic in the buffer.
+  await emacsEval(`(with-current-buffer "app.el"
+    (message "flymake-%s-%s" flymake-mode
+             (mapcar (lambda (d) (list (flymake-diagnostic-type d) (line-number-at-pos (flymake-diagnostic-beg d))))
+                     (flymake-diagnostics))))`);
+  await screenUntil(/flymake-t-\(\(:warning \d+\)\)/, "Flymake has the warning at its line");
   // RET on the warning's line, as in any compilation buffer: the place in app.el.
   await emacsEval('(progn (next-error) (message "jumped-to-%s-%s" (buffer-name) (looking-at-p "function-that-is-not-there")))');
   await screenUntil(/jumped-to-app\.el-t/, "next-error jumps to the place of the warning");
   await editFile("app.el", "(progn (function-that-is-not-there) (react-set-state self :count 0))", "(react-set-state self :count 0)");
   await waitUntil(async () => !/\*elisp-studio\*/.test(await screen()), "the log window goes away when there is nothing to say", 30_000);
-  pass("compiler warnings appear in Emacs with their places (next-error jumps there) and go away when fixed");
+  await emacsEval('(with-current-buffer "app.el" (message "flymake-now-%d" (length (flymake-diagnostics))))');
+  await screenUntil(/flymake-now-0/, "the diagnostic is gone with the warning");
+  pass("compiler warnings appear in Emacs with their places (next-error jumps there), as Flymake diagnostics too, and go away when fixed");
+
+  // Emacs knows the libraries the project is written with.
+  await emacsEval(`(with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(react-plist-w")
+    (completion-at-point)
+    (message "completed-%s" (buffer-string)))`);
+  await screenUntil(/completed-\(react-plist-with/, "C-M-i completes a name of elisp-react");
+  await emacsEval(`(message "knows-%S-%s-%s"
+    (help-function-arglist 'react-fetch t)
+    (string-match-p "Change the state of SELF" (documentation 'react-set-state))
+    (fboundp 'app-server-write))`);
+  await screenUntil(/knows-\(url &rest options\)-0-t/, "arguments and documentation are known (ElDoc, C-h f)");
+  await emacsEval(`(progn
+    (xref-find-definitions "react-mount")
+    (let ((found (format "definition-%s-%s" (buffer-name) (looking-at-p "(defun react-mount"))))
+      (switch-to-buffer "app.el")
+      (message "%s" found)))`);
+  await screenUntil(/definition-react\.el-t/, "M-. goes to the definition in react.el");
+  pass("Emacs completes, describes and finds the functions of elisp-react and of the server library");
 
   await editFile("app.el", '(h1 "Fixed")', '(h1 "Fixed"');
   await screenUntil(/End of file during parsing/, "a syntax error appears in Emacs");

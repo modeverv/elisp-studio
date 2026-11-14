@@ -83,9 +83,18 @@ async function editorForms() {
         (make-directory ${lispString(PROJECT)} t)
         ${template.map(([name, content]) => `(write-region ${lispString(content)} nil ${lispString(`${PROJECT}/${name}`)} nil 'silent)`).join("\n        ")}))`,
     `(find-file ${lispString(`${PROJECT}/app.el`)})`,
+    // The libraries the project is written with, so that this Emacs can
+    // complete, describe and find their functions.  They are files: M-.
+    // needs a place to go to.
     `(progn
-      (write-region ${lispString(await text("lisp/elisp-studio.el"))} nil "/tmp/elisp-studio.el" nil 'silent)
-      (load "/tmp/elisp-studio.el" nil t))`,
+      (make-directory "/tmp/elisp-studio/" t)
+      (write-region ${lispString(await (await fetch(new URL("lisp/react.el", ELISP_REACT), { cache: "no-store" })).text())} nil "/tmp/elisp-studio/react.el" nil 'silent)
+      (write-region ${lispString(await text("lisp/app-server.el"))} nil "/tmp/elisp-studio/app-server.el" nil 'silent)
+      (load "/tmp/elisp-studio/react.el" nil t)
+      (load "/tmp/elisp-studio/app-server.el" nil t))`,
+    `(progn
+      (write-region ${lispString(await text("lisp/elisp-studio.el"))} nil "/tmp/elisp-studio/elisp-studio.el" nil 'silent)
+      (load "/tmp/elisp-studio/elisp-studio.el" nil t))`,
   ];
 }
 
@@ -117,9 +126,12 @@ function editorLog(log, loaded, path) {
 
 // What happened to a change: the status line here, and the same in Emacs
 // (with the compiler's messages, where one can jump to their places).
-function report(status, summary, log = "") {
+// PATHS are the project files the log is about: their diagnostics in
+// Emacs are replaced by what the log says.
+function report(status, summary, log = "", paths = []) {
   setStatus(summary, status);
-  tellEditor({ type: "log", status, summary: `elisp-studio: ${summary}`, log });
+  tellEditor({ type: "log", status, summary: `elisp-studio: ${summary}`, log,
+               files: paths.map((path) => `${PROJECT}/${path}`) });
 }
 
 // ---- the server -----------------------------------------------------------------
@@ -318,7 +330,8 @@ async function startPreview(project, why) {
     const log = app.compileLogs
       .map((entry) => editorLog(entry.log, entry, built.sources.find((source) => source.name === entry.name)?.path))
       .filter(Boolean).join("\n\n");
-    report("ok", `${why}: the application runs (Emacs ${app.version}, ${clock()})`, log);
+    report("ok", `${why}: the application runs (Emacs ${app.version}, ${clock()})`, log,
+           built.sources.map((source) => source.path).filter(Boolean));
   } catch (error) {
     if (mine !== generation) return;
     // Take the frame away: that also ends an Emacs that is stuck in the
@@ -380,14 +393,15 @@ async function applyProject(next) {
         const text = `${error.symbol ? `${error.symbol}: ` : ""}${error.message}`;
         showError(text);
         report("error", `${path}: not applied (the application runs on with the old code)`,
-               `${error.log ? `${editorLog(error.log, error, path)}\n\n` : ""}${text}`);
+               `${error.log ? `${editorLog(error.log, error, path)}\n\n` : ""}${text}`, [path]);
         return;
       }
     }
   }
   if (done.length) {
     showError("");
-    report("ok", `${done.join(", ")} updated at ${clock()}: no reload, state kept`, logs.join("\n\n"));
+    report("ok", `${done.join(", ")} updated at ${clock()}: no reload, state kept`, logs.join("\n\n"),
+           done.filter((path) => preview.sources.has(path)));
   }
 }
 

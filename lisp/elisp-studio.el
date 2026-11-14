@@ -18,12 +18,21 @@
 ;;
 ;; What the application's Emacs says about the code (compiler warnings,
 ;; errors) is shown in the buffer *elisp-studio*, in `compilation-mode':
-;; RET or M-g n jumps to the place.
+;; RET or M-g n jumps to the place.  The same messages are Flymake
+;; diagnostics in the project's buffers: the places are marked, the mode
+;; line counts them, M-x flymake-goto-next-error walks through them.
+;;
+;; The libraries the project is written with (elisp-react's react.el,
+;; app-server.el) are loaded into this Emacs as well.  They do nothing here,
+;; but Emacs knows their functions: C-M-i completes their names, ElDoc
+;; shows their arguments, M-. goes to their definitions, C-h f describes
+;; them.
 
 ;;; Code:
 
 (require 'json)
 (require 'compile)
+(require 'flymake)
 
 (defconst elisp-studio-project "/home/user/elisp-studio/app/"
   "The directory of the project.")
@@ -67,9 +76,11 @@ carries the decoded message."
   (interactive "e")
   (let ((message (cadr event)))
     (pcase (plist-get message :type)
-      ("log" (elisp-studio--show-log (plist-get message :status)
-                                     (plist-get message :summary)
-                                     (plist-get message :log))))))
+      ("log"
+       (elisp-studio--set-diagnostics (append (plist-get message :files) nil) (plist-get message :log))
+       (elisp-studio--show-log (plist-get message :status)
+                               (plist-get message :summary)
+                               (plist-get message :log))))))
 
 (define-key input-decode-map elisp-studio--message-start #'elisp-studio--read-message)
 ;; Like a bracketed paste (xterm-paste), the event goes through the keymaps.
@@ -98,6 +109,50 @@ messages and errors with file names of this Emacs (or nil)."
       (display-buffer buffer '((display-buffer-reuse-window display-buffer-at-bottom)
                                (window-height . 8))))
     (message "%s" summary)))
+
+;;;; Diagnostics in the buffers (Flymake)
+
+;; Emacs's own Flymake backends for Emacs Lisp start a second Emacs, which
+;; this one cannot.  But the application's Emacs compiles every file that is
+;; saved, and its messages arrive here: they are the diagnostics.
+
+(defvar elisp-studio--diagnostics (make-hash-table :test #'equal)
+  "File name -> list of (LINE COLUMN TYPE TEXT) from the last compilation.")
+
+(defvar-local elisp-studio--flymake-report nil
+  "The function Flymake gave this buffer's backend to report with.")
+
+(defun elisp-studio--set-diagnostics (files log)
+  "Take the compiler's LOG as the diagnostics of FILES (absolute names).
+Files that LOG says nothing about have none."
+  (dolist (file files) (remhash file elisp-studio--diagnostics))
+  (let ((start 0))
+    (while (string-match "^\\(/[^:\n]+\\):\\([0-9]+\\):\\([0-9]+\\): \\(Warning\\|Error\\): \\(.*\\)$"
+                         (or log "") start)
+      (setq start (match-end 0))
+      (push (list (string-to-number (match-string 2 log)) (string-to-number (match-string 3 log))
+                  (if (equal (match-string 4 log) "Error") :error :warning)
+                  (match-string 5 log))
+            (gethash (match-string 1 log) elisp-studio--diagnostics))))
+  ;; Flymake takes a backend's word once per check: ask it to check again.
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (and (bound-and-true-p flymake-mode) (member buffer-file-name files))
+        (flymake-start)))))
+
+(defun elisp-studio--flymake-publish ()
+  "Report this buffer's diagnostics to Flymake."
+  (funcall elisp-studio--flymake-report
+           (mapcar (lambda (entry)
+                     (let ((region (flymake-diag-region (current-buffer) (nth 0 entry) (nth 1 entry))))
+                       (flymake-make-diagnostic (current-buffer) (car region) (cdr region)
+                                                (nth 2 entry) (nth 3 entry))))
+                   (gethash buffer-file-name elisp-studio--diagnostics))))
+
+(defun elisp-studio-flymake (report-function &rest _)
+  "A Flymake backend: what the application's Emacs said about this file."
+  (setq elisp-studio--flymake-report report-function)
+  (elisp-studio--flymake-publish))
 
 ;;;; The project's buffers
 
@@ -186,9 +241,13 @@ Without a remote the commit is made and the push is left out."
   "Commands for a file of the studio's project."
   :lighter " Studio"
   :keymap elisp-studio-mode-map
-  (if elisp-studio-mode
-      (add-hook 'after-save-hook #'elisp-studio--saved nil t)
-    (remove-hook 'after-save-hook #'elisp-studio--saved t)))
+  (cond (elisp-studio-mode
+         (add-hook 'after-save-hook #'elisp-studio--saved nil t)
+         (setq-local flymake-diagnostic-functions '(elisp-studio-flymake))
+         (flymake-mode 1))
+        (t
+         (remove-hook 'after-save-hook #'elisp-studio--saved t)
+         (flymake-mode -1))))
 
 (defun elisp-studio--maybe-enable ()
   (when (and buffer-file-name

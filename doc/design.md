@@ -48,10 +48,41 @@ The editor's URL carries two `extra-eval` forms, which wasmacs passes to Emacs a
 
 The editor needs `SharedArrayBuffer`, so the studio's page must be cross-origin isolated, and so must every document in it. GitHub Pages sends no such headers; `coi-serviceworker.js` (the same file wasmacs uses) adds them from a service worker. Two scopes are involved: the studio's own, and the editor's (`/wasmacs/`). A document without the headers cannot be loaded into an isolated page at all, so the editor's page could never register its own service worker from inside the iframe; the studio registers it (`ensureEditorServiceWorker`) before it sets the iframe's `src`. `npm run test:e2e:plain` runs the whole test against a server without the headers.
 
+## Talking with the editor
+
+Two more channels connect the page and the editing Emacs, both through the terminal, because that is the only pipe a blocked Emacs has.
+
+- **Emacs to the page.** `elisp-studio--send` writes a JSON object in an OSC 7777 escape sequence to the terminal. wasmacs's terminal hands the text to its page, which forwards it to the studio (`wasmacs:message`). Used for `C-M-x` (the definition's text) and to announce a save.
+- **The page to Emacs.** `tellEditor` types `ESC [ 7777 ~`, the base64 of a JSON object, `ESC [ 7778 ~` into the terminal (`wasmacs:input`). In Emacs the start sequence is bound in `input-decode-map` to a function that reads up to the end sequence, the way xterm's bracketed paste is read, and returns one event that carries the message. Used for the result of every change.
+
+`lisp/elisp-studio.el` is the editor's side. The studio passes it, the project template and the libraries as `--eval` forms; the editor's page asks for them by message (`wasmacs:options-request`), since whole files do not fit into a URL.
+
+### Results and diagnostics
+
+elisp-react's host byte-compiles each file in the application's Emacs and returns what the compiler printed. The studio replaces the file's name inside that Emacs by the project file's name in the editor and sends the text along with the one-line result. In the editor it is shown in `*elisp-studio*` in `compilation-mode`, and parsed into Flymake diagnostics for the files it is about (`elisp-studio-flymake`; Emacs's own Emacs Lisp backends start a second Emacs process, which is not possible here).
+
+The editor also loads `react.el` and `app-server.el` from files. They do nothing there, but their functions exist, so completion, ElDoc, `C-h f` and `M-.` work for them like for any Emacs Lisp.
+
+### C-M-x
+
+The definition at point goes to the application as text and is evaluated there (not compiled). The application now differs from the files. The studio remembers the file as "unsaved"; when Emacs announces a save of it, the next file image is applied even if its text is what the application was given before.
+
+## The server
+
+`lisp/app-server.el` defines the contract of a project's `server.el`: `app-server-handle (method path body)` returns Lisp data or signals an error, and `app-server-respond` turns that into a status and a printed body. The same two files run in two hosts:
+
+- In the studio, a third eval service worker. The studio gives the application a `fetch` (elisp-react's `start({ fetch })`) that hands requests for `/api/...` to `app-server-respond` and builds the `Response`; everything else goes to the network. After each request the studio asks for what the server keeps (`app-server--dump`) and saves it in `localStorage`; a new server gets it back (`app-server--restore`). A request that does not return within eight seconds ends that Emacs and starts another.
+- `tools/serve-project.el`, a small HTTP server in Emacs Lisp for a native Emacs: files from the project directory, `/api/...` through `app-server-respond`, data in `.data/`.
+
+Requests and responses are printed Lisp on both. Nothing a page sends is evaluated: a body is `read` as data by the project's handler.
+
+## Publishing
+
+The studio already has the project's files (it reads them from the editor's image), so the ZIP is built in the page (`js/zip.js`). The git path lives entirely in Emacs: `elisp-studio-publish` runs `git` with `process-file` in wasmacs's process service. Hidden files, `.git` among them, are not part of what the studio treats as the project.
+
 ## What is not there yet
 
-- A server side: a third Emacs in the tab that answers the application's `fetch("/api/...")`, running the same code that a native Emacs would run as a real server (see `examples/server` in elisp-react).
-- Publishing: the project is a static site; `git` works in the editor, and a button could do the rest.
-- Errors in Emacs: compile and run-time errors should show up as a buffer with locations, not only below the application.
-- Evaluating one form: `C-M-x` in the editor could send a single definition instead of waiting for a save.
-- More than one project.
+- More than one project, and a way to start a new one from the page.
+- Diagnostics while typing, and locations for errors that happen while the application runs.
+- A language server for anything but Emacs Lisp: Eglot is there, a server program for wasmacs's process service is not.
+- A button for the whole way to a public URL (create the repository, push, enable Pages).
