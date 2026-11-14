@@ -1,0 +1,8 @@
+body { margin: 0; padding: 28px; background: #16181d; color: #e6e6e6; font: 16px/1.6 system-ui, sans-serif; }
+h1 { font-size: 24px; margin: 0; color: #c792ea; }
+.time { color: #7fd88b; }
+.time { margin: 8px 0 16px; font: 64px/1.1 ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
+.buttons { display: flex; gap: 10px; }
+button { font: inherit; padding: 6px 18px; border: 0; border-radius: 6px; background: #5b3d8f; color: #fff; cursor: pointer; }
+button:disabled { background: #33363d; color: #777; cursor: default; }
+.laps { margin: 18px 0 0; padding-left: 28px; font: 18px ui-monospace, Menlo, monospace; color: #9aa0aa; }

@@ -6,6 +6,10 @@ Live: <https://modeverv.github.io/elisp-studio/> (Chrome on a desktop; the first
 
 [日本語](README.ja.md)
 
+![The studio in use: a stopwatch keeps running while its title, its code and its stylesheet are edited in Emacs](doc/images/demo.gif)
+
+*A stopwatch written in Emacs Lisp, edited while it runs. The title is changed in Emacs and saved; a typo is marked by Flymake as it is typed; the stylesheet's colour is changed. The clock on the right never stops. (Recorded by `tools/record-demo.mjs`; try the same project at [`?example=stopwatch`](https://modeverv.github.io/elisp-studio/?example=stopwatch).)*
+
 ```text
 ┌──────────────────────────────┬──────────────────────────────┐
 │ GNU Emacs                    │ your application             │
@@ -25,7 +29,7 @@ Both halves are Emacs. On the left is the real GNU Emacs 30.2, running in the pa
 3. In Emacs, change a text in `app.el`, for example `"Count: %d"`, and save with `C-x C-s`.
 4. The application shows the new text, and the counter still has its count.
 
-The project is `/home/user/elisp-studio/app` in Emacs's filesystem, which the browser keeps: it is still there at the next visit. It is the same `/home/user` that the wasmacs page itself uses, so the project is also there when you open wasmacs directly. Its files:
+The project is `/home/user/elisp-studio/app` in Emacs's filesystem, which the browser keeps: it is still there at the next visit. A new project starts from `template/`, or, with `?example=stopwatch` in the address, from `examples/stopwatch/`; a project that exists is never replaced (remove the directory in Emacs to start over). It is the same `/home/user` that the wasmacs page itself uses, so the project is also there when you open wasmacs directly. Its files:
 
 ```text
 index.html   the page: a <div id="app">, the stylesheet, <script type="text/emacs-lisp" src="app.el">
@@ -55,7 +59,11 @@ In Emacs, in a file of the project:
 | `C-M-i`, `M-.`, `C-h f` | Complete, find and describe functions: Emacs's, those of elisp-react, and the project's own once the file that defines them is saved. ElDoc shows arguments while you type. |
 | `M-g n`, `M-g p` | Go to the next or previous place the compiler complained about. |
 
+![A misspelled function name is marked in the buffer, and the list of diagnostics names it, before the file is saved](doc/images/diagnostics.png)
+
 While you type, Flymake marks what the byte compiler would complain about: the editing Emacs compiles the buffer's text a moment after each change, without saving or running it. What the application's Emacs says about a saved file comes back too: one line in the echo area, and the compiler's warnings and errors in the buffer `*elisp-studio*` (a compilation buffer: `RET` jumps to the place).
+
+![After C-x C-s: the title on the right is the new one, the clock runs on, Emacs says "no reload, state kept"](doc/images/live-reload.png)
 
 A mistake does not take the application down: if the new code does not load, the error is shown under the application and the old code keeps running. An endless loop does take it down, and only it: the studio starts a new application at the next save, and Emacs keeps editing. The "restart app" button starts the application again from the files.
 
@@ -115,6 +123,7 @@ npm run serve            # http://127.0.0.1:5190/elisp-studio/
 npm run test:unit        # tar, zip, and a project served by a native Emacs
 npm run test:e2e         # the studio in headless Chrome
 npm run test:e2e:plain   # the same without isolation headers, as GitHub Pages serves
+node tools/record-demo.mjs   # record the pictures of this README again (needs ffmpeg)
 ```
 
 ## Limits

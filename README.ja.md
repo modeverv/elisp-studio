@@ -6,6 +6,10 @@ Emacs Lisp の Web アプリケーションをブラウザの中で書き、リ�
 
 [English](README.md)
 
+![studio を使っているところ。Emacs でタイトル、コード、スタイルシートを編集している間も、ストップウォッチは動き続ける](doc/images/demo.gif)
+
+*Emacs Lisp で書いたストップウォッチを、動かしたまま編集しています。Emacs でタイトルを書き換えて保存し、打ち間違いには入力した時点で Flymake が印を付け、スタイルシートの色を変えています。右の時計は一度も止まりません。（`tools/record-demo.mjs` で録画したものです。同じプロジェクトは [`?example=stopwatch`](https://modeverv.github.io/elisp-studio/?example=stopwatch) で試せます）*
+
 ```text
 ┌──────────────────────────────┬──────────────────────────────┐
 │ GNU Emacs                    │ あなたのアプリケーション        │
@@ -25,7 +29,7 @@ Emacs Lisp の Web アプリケーションをブラウザの中で書き、リ�
 3. Emacs で `app.el` の文字列（たとえば `"Count: %d"`）を書き換え、`C-x C-s` で保存します。
 4. アプリケーションの表示が新しい文字列に変わります。カウンターの数はそのままです。
 
-プロジェクトは Emacs のファイルシステムの `/home/user/elisp-studio/app` にあります。ブラウザが保持するので、次に開いたときも残っています。これは wasmacs のページが使っているのと同じ `/home/user` なので、wasmacs を直接開いたときにもプロジェクトが見えます。ファイルは次のとおりです。
+プロジェクトは Emacs のファイルシステムの `/home/user/elisp-studio/app` にあります。ブラウザが保持するので、次に開いたときも残っています。新しいプロジェクトは `template/` から作られます。アドレスに `?example=stopwatch` を付けると `examples/stopwatch/` から作られます。すでにあるプロジェクトが置き換えられることはありません（最初からやり直すには、Emacs の中でこのディレクトリを削除します）。これは wasmacs のページが使っているのと同じ `/home/user` なので、wasmacs を直接開いたときにもプロジェクトが見えます。ファイルは次のとおりです。
 
 ```text
 index.html   ページ。<div id="app">、スタイルシート、<script type="text/emacs-lisp" src="app.el">
@@ -55,7 +59,11 @@ Emacs でプロジェクトのファイルを開いているときに使える�
 | `C-M-i`、`M-.`、`C-h f` | 関数名の補完、定義へのジャンプ、説明の表示。Emacs 自身の関数、elisp-react の関数に加えて、プロジェクトで定義した関数も、定義しているファイルを保存すれば対象になります。入力中は ElDoc が引数を表示します。 |
 | `M-g n`、`M-g p` | コンパイラが指摘した次／前の場所へ移動します。 |
 
+![綴りを間違えた関数名にバッファ上で印が付き、診断の一覧にも表示される。ファイルはまだ保存していない](doc/images/diagnostics.png)
+
 入力中は、バイトコンパイラが指摘するはずの箇所に Flymake が印を付けます。編集中の Emacs が、変更のたびに少し間をおいてバッファの内容をコンパイルします。保存も実行もしません。保存したファイルについてアプリケーション側の Emacs が言ったことも戻ってきます。エコーエリアに1行、コンパイラの警告とエラーが `*elisp-studio*` バッファに表示されます（compilation バッファなので `RET` でその場所へ飛べます）。
+
+![C-x C-s のあと。右のタイトルが新しくなり、時計は動き続け、Emacs には「no reload, state kept」と表示される](doc/images/live-reload.png)
 
 間違えてもアプリケーションは落ちません。新しいコードが読み込めなければ、エラーをアプリケーションの下に表示し、古いコードのまま動き続けます。無限ループを書いた場合はアプリケーションが止まりますが、止まるのはアプリケーションだけです。次に保存したときに studio が新しいアプリケーションを起動し、Emacs はそのまま編集を続けられます。「restart app」ボタンは、ファイルからアプリケーションを起動し直します。
 
@@ -115,6 +123,7 @@ npm run serve            # http://127.0.0.1:5190/elisp-studio/
 npm run test:unit        # tar、zip、ネイティブの Emacs で配信したプロジェクト
 npm run test:e2e         # headless Chrome で studio を操作
 npm run test:e2e:plain   # 同じテストを、GitHub Pages と同じく分離ヘッダーなしで実行
+node tools/record-demo.mjs   # この README の画像を録画し直す（ffmpeg が必要）
 ```
 
 ## 制限

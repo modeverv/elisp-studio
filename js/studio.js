@@ -17,7 +17,12 @@ const here = new URL("../", import.meta.url);                 // .../elisp-studi
 const WASMACS = new URL("../wasmacs/", here);
 const ELISP_REACT = new URL("../elisp-react/", here);
 const PROJECT = "/home/user/elisp-studio/app";
-const TEMPLATE_FILES = ["index.html", "app.el", "style.css", "server.el"];
+// What a new project starts with: template/, or with ?example=NAME one of
+// examples/.  server.el is optional.  (A project that exists is left alone.)
+const example = new URLSearchParams(location.search).get("example");
+const TEMPLATE = /^[a-z0-9-]+$/.test(example || "") ? `examples/${example}/` : "template/";
+const TEMPLATE_FILES = ["index.html", "app.el", "style.css"];
+const TEMPLATE_OPTIONAL_FILES = ["server.el"];
 const SERVER_FILE = "server.el";
 const SERVER_DATA_KEY = "elisp-studio:server-data";
 const SERVER_TIMEOUT_MS = 8000;
@@ -75,7 +80,11 @@ async function editorForms() {
     if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
     return response.text();
   };
-  const template = await Promise.all(TEMPLATE_FILES.map(async (name) => [name, await text(`template/${name}`)]));
+  const template = await Promise.all(TEMPLATE_FILES.map(async (name) => [name, await text(`${TEMPLATE}${name}`)]));
+  for (const name of TEMPLATE_OPTIONAL_FILES) {
+    const response = await fetch(new URL(`${TEMPLATE}${name}`, here), { cache: "no-store" });
+    if (response.ok) template.push([name, await response.text()]);
+  }
   return [
     `(progn
       (setq make-backup-files nil auto-save-default nil)
