@@ -228,8 +228,8 @@ async function keepServerData(current) {
 // requests that are complete now, and work the server asks for
 // (app-server-after, app-server-fetch), which is reported back when done.
 function serverEvents(current, events) {
-  for (const [id, status, text] of events.finished || []) {
-    current.deferred.get(id)?.([status, text]);
+  for (const [id, status, text, headers] of events.finished || []) {
+    current.deferred.get(id)?.([status, text, headers]);
     current.deferred.delete(id);
   }
   for (const [id, command, argument] of events.commands || []) {
@@ -256,32 +256,61 @@ function serverEvents(current, events) {
   }
 }
 
+// The application's requests never reach the browser's network code, so
+// its cookies are kept here: what server.el sets comes back with the next
+// request, until the studio is reloaded.
+const cookies = new Map();
+function keepCookie(text) {
+  const [pair, ...attributes] = text.split(";").map((part) => part.trim());
+  const equals = pair.indexOf("=");
+  if (equals < 1) return;
+  const gone = attributes.some((attribute) => /^max-age=(0|-\d+)$/i.test(attribute));
+  if (gone) cookies.delete(pair.slice(0, equals));
+  else cookies.set(pair.slice(0, equals), pair.slice(equals + 1));
+}
+
+// The headers of a request, as the plist the server takes: { cookie, ... }.
+function requestHeaders(given) {
+  const headers = {};
+  for (const [name, value] of new Headers(given || {})) headers[name.toLowerCase()] = value;
+  if (cookies.size) headers.cookie = [...cookies].map(([name, value]) => `${name}=${value}`).join("; ");
+  return headers;
+}
+
 // The fetch of the application: /api/... goes to the server's Emacs.
 async function applicationFetch(url, options = {}) {
   const target = new URL(url, "http://application.invalid/");
   if (target.origin !== "http://application.invalid" || !target.pathname.startsWith("/api/")) {
     return fetch(url, options);
   }
-  const lisp = (status, value) => new Response(value, {
-    status, headers: { "Content-Type": "application/x-emacs-lisp; charset=utf-8" },
-  });
+  // The answer as a Response.  Set-Cookie is not a header a page may see:
+  // the cookies go to the jar that stands in for the browser's.
+  const lisp = (status, value, headers = []) => {
+    const response = new Headers({ "Content-Type": "application/x-emacs-lisp; charset=utf-8" });
+    for (const [name, text] of headers) {
+      if (name.toLowerCase() === "set-cookie") keepCookie(text);
+      else response.append(name, text);
+    }
+    return new Response(value, { status, headers: response });
+  };
   if (!server) return lisp(404, '"This application has no server.el"');
   try {
     const current = server;
     const result = await withTimeout(
-      current.emacs.call("app-server-tab-request", options.method || "GET", target.pathname + target.search, options.body ?? ""),
+      current.emacs.call("app-server-tab-request", options.method || "GET", target.pathname + target.search, options.body ?? "",
+        requestHeaders(options.headers)),
       SERVER_TIMEOUT_MS, "the server");
     // An answer that comes later (app-server-defer) arrives with the
     // events of some later call.
     const later = result.answer ? null : new Promise((resolve) => {
       current.deferred.set(result.pending, resolve);
-      setTimeout(() => resolve([504, '"The server did not answer in time"']), DEFERRED_TIMEOUT_MS);
+      setTimeout(() => resolve([504, '"The server did not answer in time"', []]), DEFERRED_TIMEOUT_MS);
     });
     serverEvents(current, result);
     await keepServerData(current);
-    const [status, text] = result.answer || await later;
+    const [status, text, headers] = result.answer || await later;
     current.deferred.delete(result.pending);
-    return lisp(status, text);
+    return lisp(status, text, headers);
   } catch (error) {
     if (/did not answer/.test(error.message)) {
       // Busy for good (an endless loop in a handler): start a new one.

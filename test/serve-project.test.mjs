@@ -3,8 +3,8 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createServer as createHttpServer } from "node:http";
-import { createServer } from "node:net";
+import { Agent, createServer as createHttpServer, request as httpRequest } from "node:http";
+import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
@@ -17,9 +17,10 @@ const freePort = () => new Promise((resolve) => {
   probe.listen(0, "127.0.0.1", () => { const { port } = probe.address(); probe.close(() => resolve(port)); });
 });
 
-async function startServer(directory) {
+async function startServer(directory, environment = {}) {
   const port = await freePort();
-  const child = spawn(join(root, "tools/serve-project.sh"), [directory, String(port)], { stdio: ["ignore", "ignore", "pipe"] });
+  const child = spawn(join(root, "tools/serve-project.sh"), [directory, String(port)],
+    { stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, ...environment } });
   let log = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => { log += chunk; });
@@ -33,7 +34,7 @@ async function startServer(directory) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
-  return { origin, stop: () => new Promise((resolve) => { child.once("exit", resolve); child.kill("SIGTERM"); }) };
+  return { origin, port, log: () => log, stop: () => new Promise((resolve) => { child.once("exit", resolve); child.kill("SIGTERM"); }) };
 }
 
 test("the template project runs under a native Emacs: files, server.el, kept data", async () => {
@@ -147,6 +148,159 @@ test("a handler can answer later, and the server goes on meanwhile", async () =>
   } finally {
     await server.stop();
     slow.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// What one connection gets back for the bytes it sends.  Resolves when the
+// server closes the connection, or after WAIT ms (the connection stays open).
+const raw = (port, chunks, wait = 400) => new Promise((resolve, reject) => {
+  const socket = connect(port, "127.0.0.1");
+  let received = "";
+  const timer = setTimeout(() => { socket.destroy(); resolve({ received, closed: false }); }, wait);
+  socket.setEncoding("utf8");
+  socket.on("data", (chunk) => { received += chunk; });
+  socket.on("close", () => { clearTimeout(timer); resolve({ received, closed: true }); });
+  socket.on("error", reject);
+  socket.on("connect", async () => {
+    for (const chunk of [].concat(chunks)) {
+      if (typeof chunk === "number") await new Promise((next) => setTimeout(next, chunk));
+      else socket.write(chunk);
+    }
+  });
+});
+
+test("behind a reverse proxy: the public origin, forwarded headers, cookies, kept connections", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "elisp-studio-proxy-"));
+  await cp(join(root, "template"), directory, { recursive: true });
+  await writeFile(join(directory, "server.el"), `;;; -*- lexical-binding: t; -*-
+(defvar app-sessions (make-hash-table :test 'equal) "Session name -> visitor.")
+(defun app-visitor ()
+  (or (gethash (or (app-server-cookie "session") "") app-sessions)
+      (app-server-refuse "Sign in first" 401)))
+(defun app-server-handle (method path body)
+  (pcase (list method path)
+    ('("POST" "/api/login")
+     (let ((name (car (read-from-string body))) (session (app-server-token)))
+       (unless (equal name "ada") (app-server-refuse "Who are you?" 403))
+       (puthash session name app-sessions)
+       (app-server-set-cookie "session" session :max-age 3600)
+       (app-server-set-header "X-Greeting" "hello")
+       name))
+    ('("GET" "/api/me") (app-visitor))
+    ('("GET" "/api/me-later")
+     (app-server-defer (lambda (respond _fail)
+       (app-server-after 0.05 (lambda ()
+         (app-server-set-header "X-Later" "yes")
+         (funcall respond (list (app-visitor) (app-server-parameter "greeting"))))))))
+    ('("POST" "/api/logout")
+     (remhash (app-server-cookie "session") app-sessions)
+     (app-server-delete-cookie "session")
+     t)
+    ('("GET" "/api/visitor") (list (app-server-header "x-forwarded-for") (app-server-header "X-Forwarded-Proto")))
+    ('("POST" "/api/length") (length body))
+    ('("POST" "/api/split") (app-server-set-header "X-Evil" (car (read-from-string body))) t)
+    (_ (signal 'file-missing (list "No such API" path)))))
+(setq serve-project-request-timeout 1 serve-project-idle-timeout 2 serve-project-max-body 2000)
+`);
+  const server = await startServer(directory, { PUBLIC_ORIGIN: "https://app.example/" });
+  // The proxy: one kept connection to the server, and the headers a proxy adds.
+  const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+  const sockets = new Set();
+  const proxy = createHttpServer((request, response) => {
+    const upstream = httpRequest({
+      host: "127.0.0.1", port: server.port, agent, method: request.method, path: request.url,
+      headers: { ...request.headers, "x-forwarded-for": "203.0.113.7", "x-forwarded-proto": "https" },
+    }, (answer) => {
+      sockets.add(answer.socket);
+      response.writeHead(answer.statusCode, answer.headers);
+      answer.pipe(response);
+    });
+    request.pipe(upstream);
+  });
+  await new Promise((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+  const published = `http://127.0.0.1:${proxy.address().port}`;
+  try {
+    const ask = async (path, options = {}) => {
+      const response = await fetch(`${published}${path}`, options);
+      return [response.status, await response.text(), response.headers];
+    };
+    const ours = { Origin: "https://app.example" };
+
+    // Pages of the public origin are the application's own; others are not.
+    assert.deepEqual((await ask("/api/visitor", { headers: ours })).slice(0, 2), [200, '("203.0.113.7" "https")']);
+    assert.equal((await ask("/api/visitor", { headers: { Origin: "https://evil.example" } }))[0], 403);
+    assert.equal((await ask("/api/login", { method: "POST", body: '"ada"', headers: { Origin: "https://evil.example" } }))[0], 403);
+
+    // Signing in: a session cookie, safe by default, Secure because the visitor came over HTTPS.
+    assert.deepEqual((await ask("/api/me", { headers: ours })).slice(0, 2), [401, '"Sign in first"']);
+    assert.deepEqual((await ask("/api/login", { method: "POST", body: '"eve"', headers: ours })).slice(0, 2), [403, '"Who are you?"']);
+    const [status, name, headers] = await ask("/api/login", { method: "POST", body: '"ada"', headers: ours });
+    assert.deepEqual([status, name, headers.get("x-greeting")], [200, '"ada"', "hello"]);
+    const cookie = headers.get("set-cookie");
+    assert.match(cookie, /^session=[0-9a-f]{64}; Path=\/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax$/);
+    const signedIn = { ...ours, Cookie: cookie.split(";")[0] };
+    assert.deepEqual((await ask("/api/me", { headers: signedIn })).slice(0, 2), [200, '"ada"']);
+    // A deferred answer still knows its request: cookies, parameters, headers to set.
+    const later = await ask("/api/me-later?greeting=hi", { headers: signedIn });
+    assert.deepEqual([later[0], later[1], later[2].get("x-later")], [200, '("ada" "hi")', "yes"]);
+    const out = await ask("/api/logout", { method: "POST", headers: signedIn });
+    assert.match(out[2].get("set-cookie"), /^session=; Path=\/; Max-Age=0;/);
+    assert.equal((await ask("/api/me", { headers: signedIn }))[0], 401);
+    // Without a proxy that says HTTPS, the cookie is not marked Secure.
+    const direct = await fetch(`${server.origin}/api/login`, { method: "POST", body: '"ada"' });
+    assert.doesNotMatch(direct.headers.get("set-cookie"), /Secure/);
+
+    // A header value cannot smuggle in another header.
+    const split = await ask("/api/split", { method: "POST", body: JSON.stringify("a\r\nSet-Cookie: session=stolen"), headers: ours });
+    assert.deepEqual([split[0], split[2].get("set-cookie")], [400, null]);
+
+    // All of that went over one connection, which the server kept open.
+    assert.equal(sockets.size, 1);
+
+    // Files: the browser may keep them and asks whether they changed.
+    const page = await ask("/app.el");
+    assert.equal(page[2].get("cache-control"), "no-cache");
+    assert.equal(page[2].get("x-content-type-options"), "nosniff");
+    const again = await ask("/app.el", { headers: { "If-None-Match": page[2].get("etag") } });
+    assert.deepEqual([again[0], again[1]], [304, ""]);
+    await writeFile(join(directory, "app.el"), ";; changed\n");
+    assert.deepEqual((await ask("/app.el", { headers: { "If-None-Match": page[2].get("etag") } })).slice(0, 2), [200, ";; changed\n"]);
+
+    // What a connection may and may not send.
+    const get = (path, more = "") => `GET ${path} HTTP/1.1\r\nHost: x\r\n${more}\r\n`;
+    const statuses = (text) => [...text.matchAll(/HTTP\/1\.1 (\d{3}) /g)].map((match) => Number(match[1]));
+    // Two requests sent at once are answered in order; the connection stays open.
+    const two = await raw(server.port, get("/api/visitor") + get("/api/nothing"));
+    assert.deepEqual([statuses(two.received), two.closed], [[200, 404], false]);
+    // HTTP/1.0, or "Connection: close": one answer, then the server closes.
+    assert.equal((await raw(server.port, "GET /api/visitor HTTP/1.0\r\n\r\n")).closed, true);
+    assert.equal((await raw(server.port, get("/api/visitor", "Connection: close\r\n"))).closed, true);
+    // HEAD: the headers of the answer, no body.
+    const head = await raw(server.port, "HEAD /app.el HTTP/1.1\r\nConnection: close\r\n\r\n");
+    assert.match(head.received, /Content-Length: 11\r\n[^]*\r\n\r\n$/);
+    // A sender that waits for "100 Continue" gets it, then its answer.
+    const expect = await raw(server.port, ["POST /api/length HTTP/1.1\r\nContent-Length: 5\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n", 150, "12345"]);
+    assert.deepEqual(statuses(expect.received), [100, 200]);
+    assert.match(expect.received, /\r\n\r\n5$/);
+    // Refused, and the connection closed: too large, no length, too many headers, not HTTP.
+    const refused = async (data, wait) => { const answer = await raw(server.port, data, wait); return [statuses(answer.received)[0], answer.closed]; };
+    assert.deepEqual(await refused("POST /api/length HTTP/1.1\r\nContent-Length: 2001\r\n\r\n"), [413, true]);
+    assert.deepEqual(await refused("POST /api/length HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n12345\r\n0\r\n\r\n"), [411, true]);
+    assert.deepEqual(await refused(`GET / HTTP/1.1\r\nX-Long: ${"x".repeat(17000)}`), [431, true]);
+    assert.deepEqual(await refused("hello\r\n\r\n"), [400, true]);
+    assert.deepEqual(await refused("GET / HTTP/1.1\r\nContent-Length: many\r\n\r\n"), [400, true]);
+    // Half a request is given a second (here), an idle connection two.
+    assert.deepEqual(await refused("GET /api/visitor HTTP/1.1\r\nHost:", 4000), [408, true]);
+    const idle = await raw(server.port, get("/api/visitor"), 6000);
+    assert.deepEqual([statuses(idle.received), idle.closed], [[200], true]);
+    // One line per request: method, path, status, time.
+    assert.match(server.log(), /serve-project: POST \/api\/login 200 \d+ms/);
+    assert.match(server.log(), /published as https:\/\/app\.example\n/);
+  } finally {
+    proxy.close();
+    agent.destroy();
+    await server.stop();
     await rm(directory, { recursive: true, force: true });
   }
 });

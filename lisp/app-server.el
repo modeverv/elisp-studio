@@ -33,6 +33,14 @@
 ;; for: `app-server-fetch' (another server), `app-server-after' (a moment)
 ;; and, under a native Emacs only, `app-server-run' (a program).
 ;;
+;; About the request and the answer, beyond the three arguments:
+;;
+;;   `app-server-parameter'                       ?name=value
+;;   `app-server-refuse'                          answer with an error status
+;;   `app-server-header', `app-server-cookie'     what came with the request
+;;   `app-server-set-header', `app-server-set-cookie', `app-server-delete-cookie'
+;;   `app-server-token'                           a random name for a session
+;;
 ;; This file is loaded before server.el in both.  It gives the server
 ;; places to keep data:
 ;;
@@ -98,11 +106,115 @@ text from what a page sent."
         (setf (alist-get name app-server--databases nil nil #'equal) database)
         database))))
 
-(defvar app-server--parameters nil "The query of the request being answered: an alist.")
+(defvar app-server--tab nil "Non-nil in a server that lives in a browser tab.")
+
+;;;; The request being answered
+
+(cl-defstruct (app-server--request (:constructor app-server--request-create))
+  parameters            ; the query: an alist (NAME VALUE)
+  headers               ; alist (NAME . VALUE), names in lower case
+  response-headers)     ; list of (NAME . VALUE), newest first
+
+(defvar app-server--request nil
+  "The request being answered, also while functions of a deferred request run.")
+
+(defun app-server--current-request ()
+  (or app-server--request (error "No request is being answered")))
 
 (defun app-server-parameter (name &optional default)
   "The value of ?NAME=... in the request being answered, or DEFAULT."
-  (or (cadr (assoc name app-server--parameters)) default))
+  (or (cadr (assoc name (app-server--request-parameters (app-server--current-request)))) default))
+
+(define-error 'app-server-refusal "The request is refused")
+
+(defun app-server-refuse (message &optional status)
+  "Refuse the request being answered: MESSAGE is the response.
+STATUS is the HTTP status, 400 by default: 401 for a visitor who has to
+sign in, 403 for one who may not, 404 for what is not there."
+  (signal 'app-server-refusal (list message (or status 400))))
+
+(defun app-server-header (name)
+  "The value of the header NAME of the request being answered, or nil.
+Behind a reverse proxy, \"x-forwarded-for\" and \"x-forwarded-proto\" are
+what the proxy says about the visitor; they can be believed because the
+server only listens to this machine."
+  (cdr (assoc (downcase name) (app-server--request-headers (app-server--current-request)))))
+
+(defun app-server-cookie (name)
+  "The value of the cookie NAME that came with the request, or nil."
+  (let ((header (app-server-header "cookie")) value)
+    (dolist (pair (and header (split-string header ";" t "[ \t]+")))
+      (let ((equals (string-search "=" pair)))
+        (when (and equals (not value) (equal (substring pair 0 equals) name))
+          (setq value (decode-coding-string (url-unhex-string (substring pair (1+ equals))) 'utf-8)))))
+    value))
+
+(defun app-server-set-header (name value)
+  "Send the header NAME: VALUE with the answer to the request."
+  (unless (string-match-p "\\`[A-Za-z0-9-]+\\'" name)
+    (error "Not a header name: %S" name))
+  (when (member (downcase name) '("content-length" "content-type" "connection" "transfer-encoding"))
+    (error "The server sets %s itself" name))
+  ;; A line break in a value would start a header of the sender's choosing.
+  (when (string-match-p "[\0-\x1f\x7f]" value)
+    (error "A header value cannot contain control characters"))
+  (push (cons name value) (app-server--request-response-headers (app-server--current-request)))
+  nil)
+
+(defun app-server-set-cookie (name value &rest attributes)
+  "Give the visitor's browser the cookie NAME with VALUE (a string).
+ATTRIBUTES is a plist:
+
+:max-age SECONDS   how long the browser keeps it; without, until it closes
+:path STRING       \"/\" by default
+:http-only FLAG    hidden from the page's scripts; t by default
+:secure FLAG       only over HTTPS; by default, when the request came
+                   over HTTPS (the proxy's X-Forwarded-Proto)
+:same-site STRING  \"Lax\" (default), \"Strict\" or \"None\""
+  (unless (string-match-p "\\`[A-Za-z0-9_-]+\\'" name)
+    (error "Not a cookie name: %S" name))
+  (let ((path (or (plist-get attributes :path) "/"))
+        (same-site (or (plist-get attributes :same-site) "Lax"))
+        (max-age (plist-get attributes :max-age)))
+    (unless (member same-site '("Lax" "Strict" "None")) (error "Not a SameSite value: %S" same-site))
+    (when (string-match-p "[;\0-\x1f\x7f]" path) (error "Not a cookie path: %S" path))
+    (app-server-set-header
+     "Set-Cookie"
+     (concat name "=" (url-hexify-string value) "; Path=" path
+             (and max-age (format "; Max-Age=%d" max-age))
+             (and (if (plist-member attributes :http-only) (plist-get attributes :http-only) t) "; HttpOnly")
+             (and (if (plist-member attributes :secure)
+                      (plist-get attributes :secure)
+                    (equal (app-server-header "x-forwarded-proto") "https"))
+                  "; Secure")
+             "; SameSite=" same-site))))
+
+(defun app-server-delete-cookie (name)
+  "Make the visitor's browser forget the cookie NAME."
+  (app-server-set-cookie name "" :max-age 0))
+
+(defun app-server-token (&optional bytes)
+  "A random string nobody can guess: BYTES (default 32) random bytes in hex.
+For the names of sessions and the like; `random' is not for that.  (In
+the studio's browser tab, which nobody else can reach, it is what there
+is: that Emacs has no better source.)"
+  (let* ((bytes (or bytes 32))
+         (data (with-temp-buffer
+                 (set-buffer-multibyte nil)
+                 (condition-case nil
+                     (insert-file-contents-literally "/dev/urandom" nil 0 bytes)
+                   ;; An older Emacs does not read part of a device.
+                   (error (erase-buffer)
+                          (ignore-errors
+                            (let ((coding-system-for-read 'binary))
+                              (call-process "head" "/dev/urandom" t nil "-c" (number-to-string bytes))))))
+                 (buffer-string))))
+    (cond ((= (length data) bytes))
+          (app-server--tab
+           (random t)
+           (setq data (apply #'unibyte-string (cl-loop repeat bytes collect (random 256)))))
+          (t (error "This system gives no random bytes")))
+    (mapconcat (lambda (byte) (format "%02x" byte)) data "")))
 
 ;;;; Answering later
 
@@ -111,8 +223,6 @@ text from what a page sent."
 
 (defvar app-server-deferred-timeout 30
   "Seconds after which a deferred request is answered with an error (504).")
-
-(defvar app-server--tab nil "Non-nil in a server that lives in a browser tab.")
 
 (defvar app-server--fail nil
   "While code of a deferred request runs: the function that fails that request.")
@@ -131,11 +241,15 @@ so does `app-server-deferred-timeout'."
 (defun app-server--guard (function)
   "FUNCTION, wrapped for running later on behalf of the current request.
 An error it signals fails that request instead of being lost."
-  (let ((fail app-server--fail))
+  (let ((fail app-server--fail)
+        (request app-server--request))
     (lambda (&rest arguments)
       (condition-case err
-          (let ((app-server--fail fail))
+          (let ((app-server--fail fail)
+                (app-server--request request))
             (apply function arguments))
+        (app-server-refusal
+         (when fail (funcall fail (nth 1 err) (nth 2 err))))
         (error
          (if fail
              (funcall fail (error-message-string err))
@@ -242,52 +356,62 @@ studio's browser tab there are no programs, and the request fails."
 
 ;;;; Requests
 
-(defun app-server-respond (method path body &optional later)
+(defun app-server-respond (method path body &optional later headers)
   "Answer one request with `app-server-handle'.
-PATH may end in a query (?name=value&...).  The value is a vector
-[STATUS TEXT]: the HTTP status and the response body, printed Lisp data.
+PATH may end in a query (?name=value&...).  HEADERS is the request's
+headers, an alist (NAME . VALUE) with the names in lower case.  The value
+is a vector [STATUS TEXT HEADERS]: the HTTP status, the response body
+(printed Lisp data) and the headers the handler asked for, a list of
+\(NAME . VALUE).
 
 If the handler defers its answer (`app-server-defer'), the value is nil
-and LATER, a function of (STATUS TEXT), is called when the answer is
-there.  A host that passes no LATER cannot wait: the request fails."
+and LATER, a function of (STATUS TEXT HEADERS), is called when the answer
+is there.  A host that passes no LATER cannot wait: the request fails."
   (let* ((print-length nil) (print-level nil)
          (question (string-search "?" path))
-         (app-server--parameters
-          (and question (url-parse-query-string (substring path (1+ question)))))
-         (path (if question (substring path 0 question) path)))
+         (app-server--request
+          (app-server--request-create
+           :parameters (and question (url-parse-query-string (substring path (1+ question))))
+           :headers headers))
+         (path (if question (substring path 0 question) path))
+         (answer (lambda (status data)
+                   (vector status (prin1-to-string data)
+                           (reverse (app-server--request-response-headers app-server--request))))))
     (condition-case err
         (if (fboundp 'app-server-handle)
             (let ((value (funcall 'app-server-handle method path body)))
-              (cond ((not (app-server--deferred-p value))
-                     (vector 200 (prin1-to-string value)))
-                    ((not later)
-                     (vector 500 (prin1-to-string "This server cannot answer later")))
+              (cond ((not (app-server--deferred-p value)) (funcall answer 200 value))
+                    ((not later) (funcall answer 500 "This server cannot answer later"))
                     (t (app-server--start-deferred value later))))
-          (vector 404 (prin1-to-string "This application has no server.el")))
-      (file-missing (vector 404 (prin1-to-string (error-message-string err))))
-      (error (vector 400 (prin1-to-string (error-message-string err)))))))
+          (funcall answer 404 "This application has no server.el"))
+      (app-server-refusal (funcall answer (nth 2 err) (nth 1 err)))
+      (file-missing (funcall answer 404 (error-message-string err)))
+      (error (funcall answer 400 (error-message-string err))))))
 
 (defun app-server--start-deferred (deferred later)
-  "Run DEFERRED's function; LATER (STATUS TEXT) gets the answer, once.
-Returns nil, or [STATUS TEXT] if the function failed right away."
+  "Run DEFERRED's function; LATER (STATUS TEXT HEADERS) gets the answer, once.
+Returns nil, or [STATUS TEXT HEADERS] if the function answered right away."
   (let* ((answered nil)
+         (request app-server--request)
          (timeout nil)
          (answer (lambda (status data)
                    (unless answered
                      (setq answered t)
                      (when timeout (cancel-timer timeout))
                      (let ((print-length nil) (print-level nil))
-                       (funcall later status (prin1-to-string data))))))
+                       (funcall later status (prin1-to-string data)
+                                (reverse (app-server--request-response-headers request)))))))
          (respond (lambda (data) (funcall answer 200 data)))
          (fail (lambda (message &optional status) (funcall answer (or status 400) message)))
          (now nil))
     ;; Until the function has returned, an answer is the value of
     ;; `app-server-respond' itself rather than something for LATER.
     (let ((later-for-real later))
-      (setq later (lambda (status text) (setq now (vector status text))))
+      (setq later (lambda (status text headers) (setq now (vector status text headers))))
       (let ((app-server--fail fail))
         (condition-case err
             (funcall (app-server--deferred-function deferred) respond fail)
+          (app-server-refusal (funcall fail (nth 1 err) (nth 2 err)))
           (error (funcall fail (error-message-string err))))
         ;; In a browser tab the page gives up by itself.
         (unless (or answered app-server--tab)
@@ -374,20 +498,32 @@ Returns nil, or [STATUS TEXT] if the function failed right away."
 
 (defun app-server--tab-events ()
   "What happened since the last call, for the page:
-\(:commands [[ID COMMAND ARGUMENT] ...] :finished [[ID STATUS TEXT] ...])."
+\(:commands [[ID COMMAND ARGUMENT] ...] :finished [[ID STATUS TEXT HEADERS] ...])."
   (prog1 (list :commands (vconcat (mapcar #'vconcat (nreverse app-server--tab-commands)))
                :finished (vconcat (mapcar #'vconcat (nreverse app-server--tab-finished))))
     (setq app-server--tab-commands nil app-server--tab-finished nil)))
 
-(defun app-server-tab-request (method path body)
+(defun app-server--tab-headers (headers)
+  "The response HEADERS, a list of (NAME . VALUE), as [[NAME VALUE] ...]."
+  (vconcat (mapcar (lambda (header) (vector (car header) (cdr header))) headers)))
+
+(defun app-server-tab-request (method path body &optional headers)
   "Answer a request of the page's application.
-The value is (:answer [STATUS TEXT]) or, when the answer comes later,
+HEADERS is a plist (:cookie \"...\" :content-type \"...\").  The value is
+\(:answer [STATUS TEXT HEADERS]) or, when the answer comes later,
 \(:pending ID); in both cases with the :commands and :finished of
-`app-server--tab-events'."
+`app-server--tab-events'.  HEADERS in an answer is [[NAME VALUE] ...]."
   (let* ((id (cl-incf app-server--tab-next))
-         (answer (app-server-respond method path body
-                                     (lambda (status text) (push (list id status text) app-server--tab-finished)))))
-    (append (if answer (list :answer answer) (list :pending id))
+         (alist (cl-loop for (name value) on headers by #'cddr
+                         collect (cons (downcase (substring (symbol-name name) 1)) value)))
+         (answer (app-server-respond
+                  method path body
+                  (lambda (status text headers)
+                    (push (list id status text (app-server--tab-headers headers)) app-server--tab-finished))
+                  alist)))
+    (append (if answer
+                (list :answer (vector (aref answer 0) (aref answer 1) (app-server--tab-headers (aref answer 2))))
+              (list :pending id))
             (app-server--tab-events))))
 
 (defun app-server-tab-report (id ok value)

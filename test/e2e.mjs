@@ -268,12 +268,15 @@ try {
          (app-server-fetch url :then (lambda (response) (funcall respond (list (plist-get response :status) (length (plist-get response :text))))))))))
     ('("GET" "/api/broken")
      (app-server-defer (lambda (_respond _fail) (app-server-after 0.05 (lambda () (error "Broke later"))))))
+    ('("POST" "/api/login") (app-server-set-cookie "session" (app-server-token 8)) (app-server-set-header "X-Greeting" "hello") t)
+    ('("GET" "/api/me") (or (app-server-cookie "session") (app-server-refuse "Sign in first" 401)))
+    ('("POST" "/api/logout") (app-server-delete-cookie "session") t)
     (_ (signal 'file-missing`);
   await until("window.elispStudio.server?.source?.includes('/api/later')", "the deferring server.el is applied");
-  const viaServer = (path) => js(`(async () => {
+  const viaServer = (path, options = {}) => js(`(async () => {
     const started = performance.now();
-    const response = await window.elispStudio.fetch(${JSON.stringify(path)});
-    return [response.status, await response.text(), performance.now() - started];
+    const response = await window.elispStudio.fetch(${JSON.stringify(path)}, ${JSON.stringify(options)});
+    return [response.status, await response.text(), performance.now() - started, response.headers.get("x-greeting")];
   })()`);
   const [[laterStatus, laterText, laterMs], [quickStatus, , quickMs]] = await Promise.all([viaServer("/api/later"), viaServer("/api/messages")]);
   assert.deepEqual([laterStatus, laterText, quickStatus], [200, '"later"', 200]);
@@ -283,6 +286,15 @@ try {
   assert.deepEqual((await viaServer(`/api/elsewhere?url=${encodeURIComponent(elsewhere)}`)).slice(0, 2), [200, `(200 ${tarLength})`]);
   assert.deepEqual((await viaServer("/api/broken")).slice(0, 2), [400, '"Broke later"']);
   pass("a handler can answer later: after a moment, after a request of its own; an error later is the response");
+
+  // Cookies: the studio keeps them for the application, as a browser would.
+  assert.deepEqual((await viaServer("/api/me")).slice(0, 2), [401, '"Sign in first"']);
+  const login = await viaServer("/api/login", { method: "POST" });
+  assert.deepEqual([login[0], login[3]], [200, "hello"]);
+  assert.match((await viaServer("/api/me"))[1], /^"[0-9a-f]{16}"$/);
+  await viaServer("/api/logout", { method: "POST" });
+  assert.equal((await viaServer("/api/me"))[0], 401);
+  pass("server.el reads and sets headers and cookies; a refusal carries its status");
 
   // Publishing: the project as a ZIP, and with git from inside Emacs.
   const zipNames = await js(`(async () => {
