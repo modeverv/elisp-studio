@@ -181,7 +181,7 @@ studio の中では、サーバーはブラウザのタブの中の3つ目の Em
 
 ### パスワード
 
-パスワードそのものは保存しません。保存するのは、計算に時間のかかるハッシュです。データベースが盗まれても、毎秒10億回の速さでパスワードを探されないようにするためです。`app-server.el` には、HMAC-SHA-256 による PBKDF2（60万回。OWASP がこの方式に示している回数）が入っています。Emacs 自身の `secure-hash` で書かれており、RFC 7914 のテストベクトルで確認しています。「時間がかかる」とは、1コアを2秒使うという意味です。そのため計算は2つ目の Emacs に任せ、サーバーは他のリクエストに応答し続けます。
+パスワードそのものは保存しません。保存するのは、計算に時間のかかるハッシュです。データベースが盗まれても、毎秒10億回の速さでパスワードを探されないようにするためです。`server.el` はハッシュの作成と照合を頼むだけで、計算がどこで行われるかを意識しません。
 
 ```elisp
 ('("POST" "/api/login")
@@ -197,9 +197,25 @@ studio の中では、サーバーはブラウザのタブの中の3つ目の Em
            (funcall respond t))))))))
 ```
 
-`(app-server-password-hash-later PASSWORD FUNCTION)` は、保存するハッシュ（`"pbkdf2-sha256$600000$SALT$HASH"`）を作ります。どちらも、スクリプト用に `-later` なしの版があります。
+`(app-server-password-hash-later PASSWORD FUNCTION)` は、保存するハッシュを作ります。誰が計算するかは、サーバーがどこで動いているかで決まります。
 
-より強い方式を使っていない理由：探した範囲では、Emacs Lisp で書かれた bcrypt、scrypt、Argon2 は見つかりませんでした。見つかったのは、[kaesar-pbkdf2.el](https://github.com/mhayashi1120/Emacs-kaesar)（Lisp で書かれた PBKDF2、GPL）、[pg-el](https://github.com/emarsden/pg-el) の中の PBKDF2（GnuTLS 経由、PostgreSQL の SCRAM 認証用）、そしてモジュールとしてコンパイルが必要な libsodium のバインディング2つ（`crypto_box` だけを公開している [sodium.el](https://github.com/dakra/sodium.el) と、Rust で書かれた [esodium](https://codeberg.org/coopi/emacs-esodium)）です。PBKDF2 は `secure-hash` の上に30行で書け、ネイティブの Emacs でもブラウザの Emacs でも、何もインストールせずに動きます。上記の回数であれば認められている選択肢ですが、GPU による攻撃への強さでは Argon2 が上です。数文字のパスワードは、どの方式でも弱いままです。
+| 動かす場所 | 計算するもの | 60万回の所要時間 |
+|---|---|---|
+| `python3` のあるマシンのネイティブ Emacs | 別プロセス。Python の `hashlib`（中身は OpenSSL の C 実装） | ログイン1回あたり 0.11 秒 |
+| `python3` のないマシンのネイティブ Emacs | 2つ目の Emacs。`secure-hash` の上に書いた30行の Lisp | 2.2 秒 |
+| studio のブラウザのタブ | ページ。ブラウザの Web Crypto | 0.07 秒 |
+
+方式は、HMAC-SHA-256 による PBKDF2 の60万回（OWASP がこの方式に示している回数）です。3つのどれでも計算できる方式を選んでいます。3つは同じバイト列を返します。テストでは、Node.js の結果と RFC 7914 のテストベクトルに照らして確認しています。そのため、どれか1つが作ったハッシュは、他のどれでも照合できます。サーバーが待つことはありません。32件のログインが同時に来ている間も、他のリクエストは毎秒18,000件で処理されます。同時に計算するハッシュの数はコア数まで（`app-server-password-jobs`）で、残りは順番を待ちます。このマシンでは毎秒74件のログインを処理できます。誰が計算するかは、起動時にサーバーのログに出ます。
+
+時間に加えてメモリも攻撃者に使わせるハッシュにするには、`server.el` に1行書きます。
+
+```elisp
+(setq app-server-password-algorithm 'scrypt)       ; N = 2^17, r = 8, p = 1：ログイン1回あたり 128 MB、0.34 秒
+```
+
+scrypt を計算できるのは `python3` だけで、それも `hashlib` が scrypt を持っている場合に限ります（macOS に付属のものは持っていません。Homebrew のものや Linux ディストリビューションのものは持っています）。持っていない環境と studio のタブでは、弱い方式に切り替えることはせず、「This server cannot make scrypt hashes」というエラーでリクエストが失敗します。ハッシュには作り方が書いてあるので（`pbkdf2-sha256$600000$SALT$HASH`、`scrypt$ln=17,r=8,p=1$SALT$HASH`）、設定を変えても既存のハッシュは有効なままです。どちらの形式も、同じ `app-server-password-check-later` で照合します。
+
+bcrypt や Argon2 を使っていない理由：Python の標準ライブラリにもブラウザにもなく、探した範囲では Emacs Lisp で書かれたものも見つかりませんでした。見つかったのは、[kaesar-pbkdf2.el](https://github.com/mhayashi1120/Emacs-kaesar)（Lisp で書かれた PBKDF2、GPL）、[pg-el](https://github.com/emarsden/pg-el) の中の PBKDF2（GnuTLS 経由、PostgreSQL の SCRAM 認証用）、そしてモジュールとしてコンパイルが必要な libsodium のバインディング2つ（`crypto_box` だけを公開している [sodium.el](https://github.com/dakra/sodium.el) と、Rust で書かれた [esodium](https://codeberg.org/coopi/emacs-esodium)）です。数文字のパスワードは、どの方式でも弱いままです。
 
 ### 公開する
 
@@ -325,4 +341,4 @@ node tools/record-demo.mjs   # この README の画像を録画し直す（ffmpe
 - GitHub への push は、Emacs 自身のファイルシステム内のリポジトリに対してだけテストしています。companion 拡張を通る経路は wasmacs のもので、そちらでテストされています。
 - タブの中のサーバーは、データのディレクトリをメモリ上に持ちます。studio は、内容を変えたリクエストのあとでそれを IndexedDB にコピーします。小さなデータベースなら問題ありませんが、大きなものには向きません。
 - `run.sh` は 127.0.0.1 でだけ待ち受けます。公開する場合や、複数のコアを使う場合は、手前にリバースプロキシが必要です（あるものとないものは、上の「公開する」にあります）。
-- studio のタブの中では、`app-server-token` が使えるのは Emacs の `random` だけで、パスワードのハッシュは60万回ではなく1万回、アップロードできるファイルは 32 MB までです。Cookie は、studio を再読み込みするまで保持されます。タブはアプリケーションを書く場所であり、他の人に向けて動かす場所ではありません。
+- studio のタブの中では、`app-server-token` が使えるのは Emacs の `random` だけで、scrypt のハッシュは作成も照合もできず、アップロードできるファイルは 32 MB までです。Cookie は、studio を再読み込みするまで保持されます。タブはアプリケーションを書く場所であり、他の人に向けて動かす場所ではありません。

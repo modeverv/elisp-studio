@@ -499,7 +499,8 @@ many."
   (message "serve-project: http://127.0.0.1:%d/ (%s)%s" serve-project-port serve-project-directory
            (if serve-project-origins
                (format ", published as %s" (string-join serve-project-origins ", "))
-             "")))
+             ""))
+  (message "serve-project: passwords are hashed by %s" (app-server-password-hasher)))
 
 (defun serve-project-run ()
   "Start the server and serve until Emacs is killed (for batch mode)."

@@ -341,15 +341,10 @@ is: that Emacs has no better source.)"
 
 ;; A password is never kept: what is kept is a hash made to be slow, so
 ;; that whoever gets hold of the database cannot try a billion guesses a
-;; second.  This is PBKDF2 with HMAC-SHA-256 (RFC 8018), 600,000 rounds
-;; (OWASP's number for it), written with Emacs's own `secure-hash'.
-;;
-;; Slow means slow for the server too: about three seconds of one core.
-;; So that nobody else waits, `app-server-password-hash-later' and
-;; `app-server-password-check-later' give the work to a second Emacs:
+;; second.
 ;;
 ;;   ('("POST" "/api/login")
-;;    (pcase-let ((`(,name ,password) (car (read-from-string body))))
+;;    (let* ((sent (car (read-from-string body))) (name (car sent)) (password (cadr sent)))
 ;;      (app-server-defer
 ;;       (lambda (respond fail)
 ;;         (app-server-password-check-later
@@ -359,11 +354,41 @@ is: that Emacs has no better source.)"
 ;;                (funcall fail "Wrong name or password" 401)
 ;;              (app-server-set-cookie "session" (app-new-session name))
 ;;              (funcall respond t))))))))
+;;
+;; server.el asks with `app-server-password-hash-later' and
+;; `app-server-password-check-later'; where the arithmetic is done depends
+;; on where the server runs, and server.el does not see the difference:
+;;
+;;   a native Emacs    another process: python3 (its hashlib is OpenSSL's C),
+;;                     or, where there is no python3, a second Emacs running
+;;                     the Lisp below
+;;   the studio's tab  the page, with the browser's own Web Crypto
+;;
+;; The hash is PBKDF2 with HMAC-SHA-256 (RFC 8018), 600,000 rounds (OWASP's
+;; number for it), which all three can compute, with the same result.
+;; `app-server-password-algorithm' can be `scrypt' instead, which costs an
+;; attacker memory as well as time; only python3 computes that, so it is
+;; for a server that has one.  A hash says how it was made
+;; ("pbkdf2-sha256$600000$SALT$HASH", "scrypt$ln=17,r=8,p=1$SALT$HASH"), so
+;; hashes made before a change of these settings stay valid.
+
+(defvar app-server-password-algorithm 'pbkdf2-sha256
+  "How new password hashes are made: `pbkdf2-sha256' or `scrypt'.
+`scrypt' needs a python3 whose hashlib has it, on the server; the
+studio's browser tab cannot compute it.")
 
 (defvar app-server-password-rounds 600000
-  "How many rounds a new password hash gets.
-A hash says how many it has, so hashes made with another number stay
-valid.")
+  "How many rounds a new PBKDF2 hash gets.")
+
+(defvar app-server-password-scrypt "ln=17,r=8,p=1"
+  "The cost of a new scrypt hash: N = 2^ln (here 128 MB of memory), r, p.")
+
+(defvar app-server-password-python "python3"
+  "The Python that hashes passwords for a native server, or nil for none.
+Without one, a second Emacs does it, some twenty times slower.")
+
+(defvar app-server-password-jobs (max 1 (if (fboundp 'num-processors) (num-processors) 2))
+  "How many passwords are hashed at the same time; more wait their turn.")
 
 (defconst app-server--file (or load-file-name buffer-file-name)
   "This file, for the second Emacs that hashes passwords.")
@@ -393,6 +418,33 @@ valid.")
     (let ((byte-compile-warnings nil))
       (byte-compile 'app-server--pbkdf2))))
 
+(defun app-server--password-parse (hash)
+  "The parts of HASH, (ALGORITHM PARAMETERS SALT DIGEST), or nil if it is none."
+  (let ((parts (and (stringp hash) (split-string hash "\\$"))))
+    (and (= (length parts) 4)
+         (string-match-p "\\`[0-9a-z=,]+\\'" (nth 1 parts))
+         (string-match-p "\\`[0-9a-f]+\\'" (nth 3 parts))
+         parts)))
+
+(defun app-server--same-p (one other)
+  "Non-nil if the strings ONE and OTHER are equal.
+All of them is compared: how long this takes says nothing about where
+the first difference is."
+  (and (stringp one) (stringp other) (= (length one) (length other))
+       (let ((difference 0))
+         (dotimes (index (length one))
+           (setq difference (logior difference (logxor (aref one index) (aref other index)))))
+         (= difference 0))))
+
+(defun app-server--password-parameters ()
+  "The cost of a new hash, as its second part says it."
+  (pcase app-server-password-algorithm
+    ('pbkdf2-sha256 (number-to-string app-server-password-rounds))
+    ('scrypt app-server-password-scrypt)
+    (_ (error "Not a way to hash passwords: %S" app-server-password-algorithm))))
+
+;; Here, in this Emacs: for a script.  A handler would hold up everyone.
+
 (defun app-server-password-hash (password)
   "A hash of PASSWORD, to keep instead of it.
 It reads \"pbkdf2-sha256$ROUNDS$SALT$HASH\".  Takes seconds, during which
@@ -403,60 +455,159 @@ this Emacs does nothing else; in a handler use
             (app-server--pbkdf2 (encode-coding-string password 'utf-8) salt app-server-password-rounds))))
 
 (defun app-server-password-check (password hash)
-  "Non-nil if PASSWORD is the one HASH was made of (`app-server-password-hash').
+  "Non-nil if PASSWORD is the one HASH was made of.
 Takes as long as making the hash did; in a handler use
-`app-server-password-check-later'."
-  (let ((parts (split-string (or hash "") "\\$")))
-    (and (= (length parts) 4)
-         (equal (nth 0 parts) "pbkdf2-sha256")
-         (string-match-p "\\`[0-9]+\\'" (nth 1 parts))
-         (let ((mine (app-server--pbkdf2 (encode-coding-string password 'utf-8) (nth 2 parts)
-                                         (string-to-number (nth 1 parts))))
-               (theirs (nth 3 parts))
-               (difference 0))
-           ;; Compare all of it: how long this takes says nothing about
-           ;; where the first difference is.
-           (and (= (length mine) (length theirs))
-                (progn (dotimes (index (length mine))
-                         (setq difference (logior difference (logxor (aref mine index) (aref theirs index)))))
-                       (= difference 0)))))))
+`app-server-password-check-later'.  Only for PBKDF2 hashes: this Emacs
+cannot compute scrypt."
+  (let ((parts (app-server--password-parse hash)))
+    (and parts
+         (if (equal (car parts) "pbkdf2-sha256")
+             (app-server--same-p
+              (app-server--pbkdf2 (encode-coding-string password 'utf-8) (nth 2 parts)
+                                  (string-to-number (nth 1 parts)))
+              (nth 3 parts))
+           (error "A %s hash is checked with `app-server-password-check-later'" (car parts))))))
 
-(defun app-server--password-later (form function)
-  "Evaluate FORM, which hashes, in a second Emacs; FUNCTION gets its value.
-Without programs to run (the studio's browser tab) it is done here."
-  (if app-server--tab
-      (funcall function (apply (car form) (nthcdr 2 form)))
-    (app-server-run
-     (list (expand-file-name invocation-name invocation-directory) "--batch" "-Q"
-           "-l" app-server--file "--eval" "(app-server--password-child)")
-     ;; The password goes in by the pipe, not on the command line, where
-     ;; other users of the machine could read it.
-     :input (base64-encode-string (encode-coding-string (prin1-to-string form) 'utf-8) t)
-     :then (lambda (result)
-             (unless (eq (plist-get result :status) 0) (error "The password could not be hashed"))
-             (funcall function (car (read-from-string (plist-get result :output))))))))
+;; Elsewhere, while this Emacs goes on: for a handler.
 
-(defun app-server--password-child ()
-  "In the second Emacs: evaluate the form on standard input, print its value."
-  (let* ((text (with-temp-buffer (insert-file-contents "/dev/stdin") (buffer-string)))
-         (form (car (read-from-string (decode-coding-string (base64-decode-string text) 'utf-8)))))
-    ;; Only the two forms this file sends.
-    (unless (memq (car form) '(app-server-password-hash app-server-password-check))
-      (kill-emacs 2))
-    (setq app-server-password-rounds (nth 1 form))
-    (prin1 (apply (car form) (nthcdr 2 form)))))
+(defvar app-server-kdf-function #'app-server--kdf-process
+  "Function of (ALGORITHM PARAMETERS PASSWORD SALT THEN) that hashes.
+It returns at once; THEN is called with the 32 bytes in hex, or with nil
+when this host cannot compute ALGORITHM.  The hosts differ in this:
+another process under a native Emacs, the page in the studio's tab.")
 
 (defun app-server-password-hash-later (password function)
   "Hash PASSWORD without holding up the server; FUNCTION gets the hash.
 For use inside `app-server-defer'."
-  (app-server--password-later (list 'app-server-password-hash app-server-password-rounds password)
-                              (app-server--guard function)))
+  (let ((algorithm (symbol-name app-server-password-algorithm))
+        (parameters (app-server--password-parameters))
+        (salt (app-server-token 16)))
+    (funcall app-server-kdf-function algorithm parameters password salt
+             (app-server--guard
+              (lambda (digest)
+                (unless digest (error "This server cannot make %s hashes" algorithm))
+                (funcall function (format "%s$%s$%s$%s" algorithm parameters salt digest)))))
+    nil))
 
 (defun app-server-password-check-later (password hash function)
   "Check PASSWORD against HASH without holding up the server.
 FUNCTION gets t or nil.  For use inside `app-server-defer'."
-  (app-server--password-later (list 'app-server-password-check app-server-password-rounds password hash)
-                              (app-server--guard function)))
+  (let ((parts (app-server--password-parse hash))
+        (function (app-server--guard function)))
+    (if (not parts)
+        (funcall function nil)
+      (funcall app-server-kdf-function (nth 0 parts) (nth 1 parts) password (nth 2 parts)
+               (app-server--guard
+                (lambda (digest)
+                  (unless digest (error "This server cannot check %s hashes" (nth 0 parts)))
+                  (funcall function (app-server--same-p digest (nth 3 parts)))))))
+    nil))
+
+;; Under a native Emacs: another process.
+
+(defvar app-server-run-function)
+
+(defconst app-server--kdf-script "\
+import sys, hashlib, base64
+algorithm, cost, salt, password = sys.stdin.read().split('\\n')[:4]
+password = base64.b64decode(password)
+salt = salt.encode()
+if algorithm == 'pbkdf2-sha256':
+    digest = hashlib.pbkdf2_hmac('sha256', password, salt, int(cost))
+elif algorithm == 'scrypt':
+    cost = dict(part.split('=') for part in cost.split(','))
+    n, r, p = 1 << int(cost['ln']), int(cost['r']), int(cost['p'])
+    digest = hashlib.scrypt(password, salt=salt, n=n, r=r, p=p, maxmem=132 * n * r * p + 1048576, dklen=32)
+else:
+    sys.exit(3)
+sys.stdout.write(digest.hex())
+"
+  "What python3 runs to hash: the request on standard input, hex out.
+The password comes by the pipe, not on the command line, where other
+users of the machine could read it.")
+
+(defvar app-server--kdf-python 'unknown
+  "(PROGRAM ALGORITHM...) for the Python that hashes, or nil for none.")
+
+(defun app-server--kdf-python ()
+  "Find out, once, whether there is a Python and what its hashlib can do."
+  (when (eq app-server--kdf-python 'unknown)
+    (setq app-server--kdf-python
+          (let ((program (and app-server-password-python (executable-find app-server-password-python))))
+            (and program
+                 (with-temp-buffer
+                   (and (eq 0 (ignore-errors
+                                (call-process program nil t nil "-c" "\
+import hashlib
+hashlib.pbkdf2_hmac('sha256', b'x', b'y', 1)
+print('pbkdf2-sha256')
+try:
+    hashlib.scrypt(b'x', salt=b'y', n=2, r=1, p=1, dklen=8)
+    print('scrypt')
+except Exception:
+    pass
+")))
+                        (cons program (split-string (buffer-string)))))))))
+  app-server--kdf-python)
+
+(defun app-server-password-hasher ()
+  "A line for the log: what hashes passwords on this server."
+  (let ((python (app-server--kdf-python)))
+    (if python
+        (format "%s (%s)" (car python) (string-join (cdr python) ", "))
+      "a second Emacs (pbkdf2-sha256)")))
+
+(defvar app-server--kdf-running 0)
+(defvar app-server--kdf-waiting nil "Hashing that waits its turn: (JOB . THEN), oldest first.")
+
+(defun app-server--kdf-next ()
+  "Start waiting jobs, as many as may run at the same time."
+  (while (and app-server--kdf-waiting (< app-server--kdf-running app-server-password-jobs))
+    (let* ((next (pop app-server--kdf-waiting))
+           (then (cdr next))
+           (finished nil)
+           (finish (lambda (digest)
+                     (unless finished
+                       (setq finished t)
+                       (cl-decf app-server--kdf-running)
+                       (unwind-protect
+                           (funcall then (and (stringp digest) (string-match-p "\\`[0-9a-f]\\{64\\}\\'" digest)
+                                              digest))
+                         (app-server--kdf-next))))))
+      (cl-incf app-server--kdf-running)
+      (condition-case err
+          (funcall (car next) finish)
+        (error (message "app-server: hashing: %s" (error-message-string err))
+               (funcall finish nil))))))
+
+(defun app-server--kdf-process (algorithm parameters password salt then)
+  "`app-server-kdf-function' for a native Emacs: python3, or a second Emacs."
+  (let* ((python (app-server--kdf-python))
+         (secret (base64-encode-string (encode-coding-string password 'utf-8) t))
+         (command (cond ((member algorithm (cdr python))
+                         (list (car python) "-c" app-server--kdf-script))
+                        ((equal algorithm "pbkdf2-sha256")
+                         (list (expand-file-name invocation-name invocation-directory) "--batch" "-Q"
+                               "-l" app-server--file "--eval" "(app-server--password-child)")))))
+    (if (not command)
+        (funcall then nil)
+      (setq app-server--kdf-waiting
+            (append app-server--kdf-waiting
+                    (list (cons (lambda (finish)
+                                  (funcall app-server-run-function command
+                                           (concat algorithm "\n" parameters "\n" salt "\n" secret "\n")
+                                           (lambda (result)
+                                             (funcall finish (and (eq (plist-get result :status) 0)
+                                                                  (plist-get result :output))))))
+                                then))))
+      (app-server--kdf-next))))
+
+(defun app-server--password-child ()
+  "In the second Emacs: hash what standard input asks for, print the hex."
+  (let ((lines (split-string (with-temp-buffer (insert-file-contents "/dev/stdin") (buffer-string)) "\n")))
+    (unless (equal (nth 0 lines) "pbkdf2-sha256") (kill-emacs 3))
+    (princ (app-server--pbkdf2 (base64-decode-string (nth 3 lines)) (nth 2 lines)
+                               (string-to-number (nth 1 lines))))))
 
 ;;;; Answering later
 
@@ -738,9 +889,17 @@ Without SQLite's transient journals and uploads that are under way."
 (defun app-server-use-tab-host ()
   "Let the page do the waiting (this Emacs lives in a browser tab)."
   (setq app-server--tab t
-        ;; This Emacs is some ten times slower than a native one and nobody
-        ;; else can reach it: hashes made here are for trying things out.
-        app-server-password-rounds 10000
+        ;; Passwords: the browser's Web Crypto does PBKDF2.  Should the page
+        ;; have none, this Emacs does it itself, slowly.
+        app-server-kdf-function
+        (lambda (algorithm parameters password salt then)
+          (app-server--tab-command
+           "kdf" (list :algorithm algorithm :parameters parameters :password password :salt salt)
+           (lambda (ok value)
+             (funcall then (cond ((and ok (stringp value)) value)
+                                 ((equal algorithm "pbkdf2-sha256")
+                                  (app-server--pbkdf2 (encode-coding-string password 'utf-8) salt
+                                                      (string-to-number parameters))))))))
         app-server-after-function
         (lambda (seconds function)
           (app-server--tab-command "timeout" (round (* 1000 seconds)) (lambda (_ok _value) (funcall function))))

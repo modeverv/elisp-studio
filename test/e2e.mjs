@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { pbkdf2Sync } from "node:crypto";
 import { join } from "node:path";
 import { serve } from "../tools/serve.mjs";
 import { CdpClient, chromePath, devToolsUrl, evaluate, pause, waitUntil } from "./lib/cdp.mjs";
@@ -273,6 +274,10 @@ try {
     ('("POST" "/api/logout") (app-server-delete-cookie "session") t)
     ('("POST" "/api/hash")
      (app-server-defer (lambda (respond _fail) (app-server-password-hash-later (car (read-from-string body)) respond))))
+    ('("POST" "/api/hash-scrypt")
+     (app-server-defer (lambda (respond _fail)
+       (let ((app-server-password-algorithm 'scrypt))
+         (app-server-password-hash-later (car (read-from-string body)) respond)))))
     ('("POST" "/api/check")
      (let ((sent (car (read-from-string body))))
        (app-server-defer (lambda (respond _fail) (app-server-password-check-later (car sent) (cadr sent) respond)))))
@@ -301,12 +306,16 @@ try {
   assert.equal((await viaServer("/api/me"))[0], 401);
   pass("server.el reads and sets headers and cookies; a refusal carries its status");
 
-  // Passwords: the same functions as under a native Emacs, with fewer rounds here.
-  const hashed = await viaServer("/api/hash", { method: "POST", body: '"correct horse"' });
-  assert.match(hashed[1], /^"pbkdf2-sha256\$10000\$[0-9a-f]{32}\$[0-9a-f]{64}"$/);
-  assert.equal((await viaServer("/api/check", { method: "POST", body: `("correct horse" ${hashed[1]})` }))[1], "t");
-  assert.equal((await viaServer("/api/check", { method: "POST", body: `("correct horsf" ${hashed[1]})` }))[1], "nil");
-  pass(`server.el hashes and checks a password in the tab (${Math.round(hashed[2])} ms for 10,000 rounds)`);
+  // Passwords: the same functions and the same hashes as under a native
+  // Emacs; here the browser's Web Crypto does the arithmetic.
+  const hashed = await viaServer("/api/hash", { method: "POST", body: '"pässword 日本語"' });
+  assert.match(hashed[1], /^"pbkdf2-sha256\$600000\$[0-9a-f]{32}\$[0-9a-f]{64}"$/);
+  const [, , hashSalt, hashDigest] = JSON.parse(hashed[1]).split("$");
+  assert.equal(hashDigest, pbkdf2Sync("pässword 日本語", hashSalt, 600000, 32, "sha256").toString("hex"));
+  assert.equal((await viaServer("/api/check", { method: "POST", body: `("pässword 日本語" ${hashed[1]})` }))[1], "t");
+  assert.equal((await viaServer("/api/check", { method: "POST", body: `("pässword 日本" ${hashed[1]})` }))[1], "nil");
+  assert.deepEqual((await viaServer("/api/hash-scrypt", { method: "POST", body: '"x"' })).slice(0, 2), [400, '"This server cannot make scrypt hashes"']);
+  pass(`server.el hashes and checks a password in the tab: the page computes it (${Math.round(hashed[2])} ms for 600,000 rounds), and says so when asked for scrypt`);
 
   // Publishing: the project as a ZIP, and with git from inside Emacs.
   const zipNames = await js(`(async () => {

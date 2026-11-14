@@ -225,6 +225,18 @@ async function keepServerData(current) {
   }
 }
 
+// PBKDF2-HMAC-SHA-256 with Web Crypto: 32 bytes in hex, or null for an
+// algorithm the browser does not have.  The same bytes as python3's hashlib
+// and app-server.el's own Lisp give for the same request.
+async function passwordDigest({ algorithm, parameters, password, salt }) {
+  if (algorithm !== "pbkdf2-sha256" || !crypto.subtle) return null;
+  const text = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", text.encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", hash: "SHA-256", salt: text.encode(salt), iterations: Number(parameters) }, key, 256);
+  return [...new Uint8Array(bits)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 // The server's Emacs runs only while it answers a call, so this page waits
 // in its place.  EVENTS is what a call left behind: answers of deferred
 // requests that are complete now, and work the server asks for
@@ -245,7 +257,11 @@ function serverEvents(current, events) {
         report("error", `server.el: ${error.message}`);
       }
     };
-    if (command === "timeout") {
+    if (command === "kdf") {
+      // A password hash: the browser's own code does the arithmetic.  What
+      // it cannot compute (scrypt) is answered with null.
+      passwordDigest(argument).then((digest) => done(true, digest), () => done(true, null));
+    } else if (command === "timeout") {
       setTimeout(() => done(true, null), argument);
     } else if (command === "fetch") {
       fetch(argument.url, {

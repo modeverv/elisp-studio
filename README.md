@@ -181,7 +181,7 @@ The page sends the file itself as the body, not a form. In elisp-react that is o
 
 ### Passwords
 
-A password is not kept; a hash that is slow to make is, so that a stolen database cannot be searched for passwords at a billion guesses a second. `app-server.el` has PBKDF2 with HMAC-SHA-256 and 600,000 rounds (the count OWASP gives for it), written with Emacs's own `secure-hash` and checked against the test vectors of RFC 7914. Slow means two seconds of one core, so the work goes to a second Emacs and the server stays free:
+A password is not kept; a hash that is slow to make is, so that a stolen database cannot be searched for passwords at a billion guesses a second. `server.el` asks for one and for a check of one, and does not see where the arithmetic is done:
 
 ```elisp
 ('("POST" "/api/login")
@@ -197,9 +197,25 @@ A password is not kept; a hash that is slow to make is, so that a stolen databas
            (funcall respond t))))))))
 ```
 
-`(app-server-password-hash-later PASSWORD FUNCTION)` makes the hash to store (`"pbkdf2-sha256$600000$SALT$HASH"`). Both exist without `-later` too, for a script.
+`(app-server-password-hash-later PASSWORD FUNCTION)` makes the hash to store. Who computes it depends on where the server runs:
 
-Why not something stronger: a search turned up no bcrypt, scrypt or Argon2 written in Emacs Lisp. There are [kaesar-pbkdf2.el](https://github.com/mhayashi1120/Emacs-kaesar) (PBKDF2 in Lisp, GPL), a PBKDF2 inside [pg-el](https://github.com/emarsden/pg-el) (through GnuTLS, for PostgreSQL's SCRAM), and two bindings to libsodium that have to be compiled as modules ([sodium.el](https://github.com/dakra/sodium.el), which exposes `crypto_box` only, and [esodium](https://codeberg.org/coopi/emacs-esodium), in Rust). PBKDF2 is thirty lines on `secure-hash` and needs nothing installed, in a native Emacs and in the browser's alike; with the round count above it is an accepted choice, though Argon2 resists graphics cards better. A password of a few characters stays weak under any of them.
+| Where | Who computes | 600,000 rounds |
+|---|---|---|
+| a native Emacs with `python3` on the machine | another process: Python's `hashlib`, which is OpenSSL's C | 0.11 s per sign-in |
+| a native Emacs without | a second Emacs, running thirty lines of Lisp on `secure-hash` | 2.2 s |
+| the studio's browser tab | the page, with the browser's Web Crypto | 0.07 s |
+
+The hash is PBKDF2 with HMAC-SHA-256 and 600,000 rounds (the count OWASP gives for it): the one all three can compute. They give the same bytes, which the tests check against Node.js and the vectors of RFC 7914, so a hash made by one is verified by any other. The server never waits: 32 sign-ins at once leave the other requests at 18,000 per second. As many hashes are computed at the same time as there are cores (`app-server-password-jobs`), the rest wait their turn; on this machine that is 74 sign-ins per second. The server's log says at the start who hashes.
+
+For a hash that costs an attacker memory as well as time, one line in `server.el`:
+
+```elisp
+(setq app-server-password-algorithm 'scrypt)       ; N = 2^17, r = 8, p = 1: 128 MB and 0.34 s per sign-in
+```
+
+Only `python3` computes scrypt, and only one whose `hashlib` has it (the one macOS ships does not; Homebrew's and Linux distributions' do). Where it is missing, and in the studio's tab, such a request fails with "This server cannot make scrypt hashes" rather than falling back to something weaker. A hash says how it was made (`pbkdf2-sha256$600000$SALT$HASH`, `scrypt$ln=17,r=8,p=1$SALT$HASH`), so changing the setting leaves the hashes that exist valid; both kinds are checked by the same `app-server-password-check-later`.
+
+Why not bcrypt or Argon2: Python's standard library has neither, the browser neither, and a search turned up none written in Emacs Lisp. What there is: [kaesar-pbkdf2.el](https://github.com/mhayashi1120/Emacs-kaesar) (PBKDF2 in Lisp, GPL), a PBKDF2 inside [pg-el](https://github.com/emarsden/pg-el) (through GnuTLS, for PostgreSQL's SCRAM), and two bindings to libsodium that have to be compiled as modules ([sodium.el](https://github.com/dakra/sodium.el), which exposes `crypto_box` only, and [esodium](https://codeberg.org/coopi/emacs-esodium), in Rust). A password of a few characters stays weak under any of them.
 
 ### Publishing it
 
@@ -325,4 +341,4 @@ node tools/record-demo.mjs   # record the pictures of this README again (needs f
 - Pushing to GitHub has been tested only against a repository inside Emacs's own filesystem; the path through the companion extension is wasmacs's and is tested there.
 - The server in the tab keeps its data directory in memory and the studio copies it to IndexedDB after a request that changed it: fine for a small database, not for a large one.
 - `run.sh` listens on 127.0.0.1; publishing it, and using more than one core, takes a reverse proxy in front ("Publishing it" above says what is and is not there).
-- In the studio's tab, `app-server-token` has only Emacs's `random` to draw on, password hashes get 10,000 rounds instead of 600,000, an uploaded file is 32 MB at most, and cookies last until the studio is reloaded: it is the place to write the application, not to run it for others.
+- In the studio's tab, `app-server-token` has only Emacs's `random` to draw on, scrypt hashes cannot be made or checked, an uploaded file is 32 MB at most, and cookies last until the studio is reloaded: it is the place to write the application, not to run it for others.

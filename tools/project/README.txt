@@ -8,7 +8,8 @@ An application written in Emacs Lisp, made with elisp-studio
   server/                         what run.sh loads into Emacs
   server/deploy/                  for publishing: Caddy, nginx, systemd
 
-To run it you need bash and GNU Emacs 29 or later:
+To run it you need bash and GNU Emacs 29 or later (and, if server.el
+checks passwords, python3 makes that twenty times faster; it works without):
 
   ./run.sh            then open http://127.0.0.1:8018/
   ./run.sh 9000       another port

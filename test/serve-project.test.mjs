@@ -2,7 +2,7 @@
 // that ran in the browser tab answers real HTTP requests.
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { createHash, pbkdf2Sync } from "node:crypto";
+import { createHash, pbkdf2Sync, scryptSync } from "node:crypto";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { Agent, createServer as createHttpServer, request as httpRequest } from "node:http";
 import { connect, createServer } from "node:net";
@@ -213,6 +213,10 @@ test("behind a reverse proxy: the public origin, forwarded headers, cookies, kep
     ('("POST" "/api/length") (length body))
     ('("POST" "/api/hash")
      (app-server-defer (lambda (respond _fail) (app-server-password-hash-later (car (read-from-string body)) respond))))
+    ('("POST" "/api/hash-scrypt")
+     (app-server-defer (lambda (respond _fail)
+       (let ((app-server-password-algorithm 'scrypt) (app-server-password-scrypt "ln=14,r=8,p=1"))
+         (app-server-password-hash-later (car (read-from-string body)) respond)))))
     ('("POST" "/api/check")
      (let* ((sent (car (read-from-string body))) (password (car sent)) (hash (cadr sent)))
        (app-server-defer (lambda (respond fail)
@@ -221,7 +225,7 @@ test("behind a reverse proxy: the public origin, forwarded headers, cookies, kep
     ('("POST" "/api/split") (app-server-set-header "X-Evil" (car (read-from-string body))) t)
     (_ (signal 'file-missing (list "No such API" path)))))
 (setq serve-project-request-timeout 1 serve-project-idle-timeout 2 serve-project-max-body 2000
-      app-server-password-rounds 300000)
+      app-server-password-rounds 300000 app-server-password-jobs 2)
 `);
   const server = await startServer(directory, { PUBLIC_ORIGIN: "https://app.example/" });
   // The proxy: one kept connection to the server, and the headers a proxy adds.
@@ -271,7 +275,7 @@ test("behind a reverse proxy: the public origin, forwarded headers, cookies, kep
     const direct = await fetch(`${server.origin}/api/login`, { method: "POST", body: '"ada"' });
     assert.doesNotMatch(direct.headers.get("set-cookie"), /Secure/);
 
-    // Passwords: a slow hash, made in a second Emacs while this one goes on answering.
+    // Passwords: a slow hash, made in another process while this one goes on answering.
     const hashing = ask("/api/hash", { method: "POST", body: '"correct horse"', headers: ours });
     await new Promise((resolve) => setTimeout(resolve, 100));
     const meanwhile = performance.now();
@@ -285,6 +289,23 @@ test("behind a reverse proxy: the public origin, forwarded headers, cookies, kep
     const check = (password) => ask("/api/check", { method: "POST", body: `(${JSON.stringify(password)} ${hashText})`, headers: ours });
     assert.deepEqual((await check("correct horse")).slice(0, 2), [200, "t"]);
     assert.deepEqual((await check("correct horsf")).slice(0, 2), [401, '"Wrong password"']);
+    assert.deepEqual((await check("correct horse")).slice(0, 2).map(String), ["200", "t"]);
+    assert.equal((await ask("/api/check", { method: "POST", body: '("x" "no hash at all")', headers: ours }))[0], 401);
+    // More at once than may run at once (two here): they wait their turn and all get an answer.
+    const many = await Promise.all(Array.from({ length: 7 }, (_, index) =>
+      fetch(`${server.origin}/api/hash`, { method: "POST", body: JSON.stringify(`password ${index}`) }).then((response) => response.status)));
+    assert.deepEqual(many, Array(7).fill(200));
+    // scrypt, where the server's python3 has it; a hash says how it was made, so the same check verifies it.
+    const scrypt = await ask("/api/hash-scrypt", { method: "POST", body: '"correct horse"', headers: ours });
+    if (pythonHas("scrypt")) {
+      assert.match(scrypt[1], /^"scrypt\$ln=14,r=8,p=1\$[0-9a-f]{32}\$[0-9a-f]{64}"$/);
+      const scryptCheck = (password) => ask("/api/check", { method: "POST", body: `(${JSON.stringify(password)} ${scrypt[1]})`, headers: ours });
+      assert.deepEqual((await scryptCheck("correct horse")).slice(0, 2), [200, "t"]);
+      assert.equal((await scryptCheck("correct horsf"))[0], 401);
+    } else {
+      assert.deepEqual(scrypt.slice(0, 2), [400, '"This server cannot make scrypt hashes"']);
+    }
+    assert.match(server.log(), /passwords are hashed by .*(python3|a second Emacs)/);
 
     // A header value cannot smuggle in another header.
     const split = await ask("/api/split", { method: "POST", body: JSON.stringify("a\r\nSet-Cookie: session=stolen"), headers: ours });
@@ -412,6 +433,39 @@ test("the upload example takes large files into .data/files and sends them back"
   } finally {
     await server.stop();
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// What the python3 on PATH can hash, as app-server.el finds out.
+function pythonHas(algorithm) {
+  try {
+    execFileSync("python3", ["-c", algorithm === "scrypt"
+      ? "import hashlib; hashlib.scrypt(b'x', salt=b'y', n=2, r=1, p=1, dklen=8)"
+      : "import hashlib; hashlib.pbkdf2_hmac('sha256', b'x', b'y', 1)"], { stdio: "ignore" });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+test("whoever hashes a password gets the same bytes: python3, a second Emacs, this Emacs", () => {
+  const emacs = execFileSync(join(root, "tools/find-emacs.sh"), { encoding: "utf8" }).trim();
+  // Ask the adapter of a native server for digests, with and without a Python.
+  const digests = (python, requests) => execFileSync(emacs, ["--batch", "-Q", "-l", join(root, "lisp/app-server.el"), "--eval", `(progn
+    (setq app-server-password-python ${python ? '"python3"' : "nil"})
+    (dolist (request '(${requests.map(([algorithm, cost, password, salt]) => `(${JSON.stringify(algorithm)} ${JSON.stringify(cost)} ${JSON.stringify(password)} ${JSON.stringify(salt)})`).join(" ")}))
+      (let ((done nil))
+        (apply #'app-server--kdf-process (append request (list (lambda (digest) (setq done (list digest))))))
+        (while (not done) (accept-process-output nil 0.05))
+        (princ (format "%s\n" (car done))))))`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim().split("\n");
+  const password = "pässword 日本語", salt = "0123456789abcdef";
+  const pbkdf2 = pbkdf2Sync(password, salt, 50000, 32, "sha256").toString("hex");
+  const scrypt = scryptSync(password, salt, 32, { N: 1 << 14, r: 8, p: 1 }).toString("hex");
+  const requests = [["pbkdf2-sha256", "50000", password, salt], ["scrypt", "ln=14,r=8,p=1", password, salt], ["md5", "1", password, salt]];
+  // A second Emacs: PBKDF2, and nothing else.
+  assert.deepEqual(digests(false, requests), [pbkdf2, "nil", "nil"]);
+  if (pythonHas("pbkdf2")) {
+    assert.deepEqual(digests(true, requests), [pbkdf2, pythonHas("scrypt") ? scrypt : "nil", "nil"]);
   }
 });
 
