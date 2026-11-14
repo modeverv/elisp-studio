@@ -673,7 +673,7 @@ test("what the security check found stays fixed", async () => {
     const data = async (text) => { const response = await fetch(`${server.origin}/api/data`, { method: "POST", body: text }); return [response.status, await response.text()]; };
     assert.deepEqual(await data('("ada" 1 2.5 [t nil] (car . "x"))'), [200, '("ada" 1 2.5 [t nil] (car . "x"))']);
     assert.deepEqual(await data("(zz-never-heard-of)"), [400, '"The request names something unknown: zz-never-heard-of"']);
-    assert.deepEqual(await data("#1=(a . #1#)"), [400, '"The request holds too much data"']);
+    assert.deepEqual(await data("#1=(car . #1#)"), [400, '"The request holds too much data"']);
     assert.deepEqual(await data("#s(hash-table data (a 1))"), [400, '"The request holds something that is not data"']);
     assert.deepEqual(await data("((("), [400, '"The request is not Lisp data"']);
     const pid = execFileSync("pgrep", ["-f", `serve-project-port ${server.port}\\)`], { encoding: "utf8" }).trim().split("\n")[0];
