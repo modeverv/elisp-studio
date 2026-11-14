@@ -624,6 +624,7 @@ function onEditorMessage(text) {
 const RUNTIME_FILES = [
   ["run.sh", "tools/project/run.sh", true],
   ["fetch-emacs.sh", "tools/project/fetch-emacs.sh", true],
+  ["backup.sh", "tools/project/backup.sh", true],
   ["README.txt", "tools/project/README.txt", false],
   ["server/serve-project.el", "tools/serve-project.el", false],
   ["server/app-server.el", "lisp/app-server.el", false],

@@ -436,6 +436,150 @@ test("the upload example takes large files into .data/files and sends them back"
   }
 });
 
+test("signing in: sessions that last, a limit on guesses, old hashes renewed, a backup", { skip: !sqliteAvailable() && "this Emacs has no SQLite" }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "elisp-studio-signin-"));
+  await cp(join(root, "template"), directory, { recursive: true });
+  await cp(join(root, "tools/project/backup.sh"), join(directory, "backup.sh"));
+  await writeFile(join(directory, "server.el"), `;;; -*- lexical-binding: t; -*-
+(setq app-server-password-rounds 200000 app-server-attempts-max 3 app-server-attempts-seconds 2)
+(defun app-hash (name) (cdr (assoc name (app-server-read "accounts"))))
+(defun app-keep-hash (name hash)
+  (app-server-write "accounts" (cons (cons name hash) (assoc-delete-all name (app-server-read "accounts")))))
+(defun app-server-handle (method path body)
+  (let* ((sent (and (not (string-empty-p body)) (car (read-from-string body))))
+         (name (car-safe sent)) (password (car-safe (cdr-safe sent))))
+    (pcase (list method path)
+      ('("POST" "/api/register")
+       (when (app-hash name) (app-server-refuse "That name is taken" 409))
+       (app-server-defer
+        (lambda (respond _fail)
+          (app-server-password-hash-later
+           password (lambda (hash) (app-keep-hash name hash) (funcall respond (app-server-session-start name)))))))
+      ('("POST" "/api/login")
+       (let ((address (app-server-visitor-address)))
+         (app-server-attempts-check name address)
+         (app-server-defer
+          (lambda (respond fail)
+            (app-server-password-check-later
+             password (app-hash name)
+             (lambda (right)
+               (if (not right)
+                   (progn (app-server-attempts-failed name address)
+                          (funcall fail "Wrong name or password" 401))
+                 (app-server-attempts-clear name)
+                 (app-server-session-start name)
+                 (if (not (app-server-password-needs-rehash-p (app-hash name)))
+                     (funcall respond (list :renewed nil))
+                   (app-server-password-hash-later
+                    password (lambda (hash) (app-keep-hash name hash) (funcall respond (list :renewed t))))))))))))
+      ('("GET" "/api/me") (or (app-server-session) (app-server-refuse "Sign in first" 401)))
+      ('("POST" "/api/logout") (app-server-session-end) t)
+      ('("POST" "/api/logout-everywhere") (app-server-session-end-all (app-server-session)) t)
+      (_ (signal 'file-missing (list "No such API" path))))))
+`);
+  let server = await startServer(directory, { WORKERS: "2" });
+  const workers = () => [server.origin, `http://127.0.0.1:${server.port + 1}`];
+  const ready = async () => {
+    for (let attempt = 0; ; attempt++) {
+      try { await fetch(`${workers()[1]}/`); break; } catch (error) {
+        if (attempt > 100) throw new Error("the second worker did not start");
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+  };
+  try {
+    await ready();
+    // A visitor: a cookie jar and an address (as the proxy would report it), asking either worker.
+    const visitor = (address) => {
+      let cookie = "", turn = 0;
+      return async (path, sent) => {
+        const started = performance.now();
+        const response = await fetch(`${workers()[turn++ % 2]}${path}`, {
+          method: sent === undefined ? "GET" : "POST", body: sent === undefined ? undefined : sent === null ? "" : `(${sent.map((part) => JSON.stringify(part)).join(" ")})`,
+          headers: { ...(cookie ? { Cookie: cookie } : {}), "X-Forwarded-For": address },
+        });
+        const set = response.headers.get("set-cookie");
+        if (set) cookie = /Max-Age=0/.test(set) ? "" : set.split(";")[0];
+        return { status: response.status, text: await response.text(), ms: performance.now() - started, retry: response.headers.get("retry-after"), cookie: () => cookie };
+      };
+    };
+    const brief = ({ status, text }) => [status, text];
+    const ada = visitor("203.0.113.1");
+
+    // A password too short to be worth hashing is refused; a good one registers and signs in.
+    assert.deepEqual(brief(await ada("/api/register", ["ada", "short"])), [400, '"A password needs at least 8 characters"']);
+    assert.deepEqual(brief(await ada("/api/me")), [401, '"Sign in first"']);
+    assert.deepEqual(brief(await ada("/api/register", ["ada", "correct horse battery"])), [200, '"ada"']);
+    assert.deepEqual(brief(await ada("/api/me")), [200, '"ada"']);          // on the other worker
+    assert.deepEqual(brief(await ada("/api/register", ["ada", "another password"])), [409, '"That name is taken"']);
+    // What the server keeps would not let anyone in: not the session's name, not the password.
+    const token = (await ada("/api/me")).cookie().split("=")[1];
+    assert.match(token, /^[0-9a-f]{64}$/);
+    const kept = Buffer.concat(await Promise.all(["server.db", "server.db-wal", "accounts.eld"].map((file) => readFile(join(directory, ".data", file)).catch(() => Buffer.alloc(0))))).toString("latin1");
+    assert.equal(kept.includes(token), false);
+    assert.equal(kept.includes("correct horse battery"), false);
+    assert.equal(kept.includes(createHash("sha256").update(token).digest("hex")), true);
+
+    // The session outlives the server.
+    await server.stop();
+    server = await startServer(directory, { WORKERS: "2" });
+    await ready();
+    assert.deepEqual(brief(await ada("/api/me")), [200, '"ada"']);
+
+    // Signing out; signing in on two devices; signing out everywhere.
+    await ada("/api/logout", null);
+    assert.equal((await ada("/api/me")).status, 401);
+    const phone = visitor("203.0.113.2");
+    assert.deepEqual(brief(await ada("/api/login", ["ada", "correct horse battery"])), [200, "(:renewed nil)"]);
+    assert.deepEqual(brief(await phone("/api/login", ["ada", "correct horse battery"])), [200, "(:renewed nil)"]);
+    assert.equal((await phone("/api/me")).status, 200);
+    await ada("/api/logout-everywhere", null);
+    assert.deepEqual([(await ada("/api/me")).status, (await phone("/api/me")).status], [401, 401]);
+    // A session name that was never given out is nobody.
+    const forged = await fetch(`${server.origin}/api/me`, { headers: { Cookie: `session=${"0".repeat(64)}` } });
+    assert.equal(forged.status, 401);
+
+    // Guessing: three failures for a name, then nobody gets in under that name for a while, right password or not.
+    const mallory = visitor("198.51.100.9");
+    for (const guess of ["password 1", "password 2", "password 3"]) {
+      assert.deepEqual(brief(await mallory("/api/login", ["ada", guess])), [401, '"Wrong name or password"']);
+    }
+    const stopped = await mallory("/api/login", ["ada", "correct horse battery"]);
+    assert.deepEqual([stopped.status, stopped.text], [429, '"Too many attempts. Try again in 1 minutes"']);
+    assert.ok(Number(stopped.retry) >= 1 && Number(stopped.retry) <= 2, `Retry-After: ${stopped.retry}`);
+    // ...and nothing more from that address, whatever the name.
+    assert.equal((await mallory("/api/login", ["grace", "whatever it is"])).status, 429);
+    // Another address is not held up for another name; an unknown name takes as long as a known one.
+    const bob = visitor("203.0.113.3");
+    const unknown = await bob("/api/login", ["nobody", "correct horse battery"]);
+    assert.equal(unknown.status, 401);
+    assert.ok(unknown.ms > 40, `no quick answer for a name that does not exist (${Math.round(unknown.ms)} ms)`);
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+    assert.equal((await mallory("/api/login", ["ada", "correct horse battery"])).status, 200);
+
+    // A hash made with fewer rounds still checks, and is renewed with the password that just proved right.
+    const old = `pbkdf2-sha256$1000$abcd$${pbkdf2Sync("an older password", "abcd", 1000, 32, "sha256").toString("hex")}`;
+    await writeFile(join(directory, ".data/accounts.eld"), `(("grace" . "${old}"))\n`);
+    assert.deepEqual(brief(await bob("/api/login", ["grace", "an older password"])), [200, "(:renewed t)"]);
+    assert.match(await readFile(join(directory, ".data/accounts.eld"), "utf8"), /^\(\("grace" \. "pbkdf2-sha256\$200000\$[0-9a-f]{32}\$[0-9a-f]{64}"\)\)\n$/);
+    assert.deepEqual(brief(await bob("/api/login", ["grace", "an older password"])), [200, "(:renewed nil)"]);
+    // A hash that asks for more work than is reasonable is not checked at all.
+    await writeFile(join(directory, ".data/accounts.eld"), `(("eve" . "pbkdf2-sha256$99999999$abcd$${"0".repeat(64)}") ("zed" . "scrypt$ln=30,r=8,p=1$abcd$${"0".repeat(64)}"))\n`);
+    const heavy = await Promise.all([visitor("203.0.113.4")("/api/login", ["eve", "whatever it is"]), visitor("203.0.113.5")("/api/login", ["zed", "whatever it is"])]);
+    assert.deepEqual(heavy.map(({ status }) => status), [401, 401]);
+    assert.ok(heavy.every(({ ms }) => ms < 3000), "no time is spent on them");
+
+    // A backup, taken while the server runs: the databases whole, the Lisp data, nothing served.
+    const saved = execFileSync(join(directory, "backup.sh"), { encoding: "utf8" }).trim().replace(/^backup\.sh: /, "");
+    assert.equal((await readFile(join(saved, "server.db"))).subarray(0, 15).toString("latin1"), "SQLite format 3");
+    assert.match(await readFile(join(saved, "accounts.eld"), "utf8"), /"eve"/);
+    assert.equal((await fetch(`${server.origin}/.backups/`)).status, 404);
+  } finally {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 // What the python3 on PATH can hash, as app-server.el finds out.
 function pythonHas(algorithm) {
   try {

@@ -42,6 +42,8 @@
 ;;   `app-server-token'                           a random name for a session
 ;;   `app-server-password-hash-later', `app-server-password-check-later'
 ;;                                                see "Passwords" below
+;;   `app-server-session-start', `app-server-session', `app-server-session-end',
+;;   `app-server-attempts-check'                  see "Signing in" below
 ;;   `app-server-upload', `app-server-keep-upload', `app-server-file',
 ;;   `app-server-send-file'                       files (see "Files" below)
 ;;
@@ -419,12 +421,44 @@ Without one, a second Emacs does it, some twenty times slower.")
       (byte-compile 'app-server--pbkdf2))))
 
 (defun app-server--password-parse (hash)
-  "The parts of HASH, (ALGORITHM PARAMETERS SALT DIGEST), or nil if it is none."
-  (let ((parts (and (stringp hash) (split-string hash "\\$"))))
+  "The parts of HASH, (ALGORITHM PARAMETERS SALT DIGEST), or nil if it is none.
+A hash whose cost is beyond reason is none either: checking it would
+keep the machine busy for whoever wrote it."
+  (let* ((parts (and (stringp hash) (split-string hash "\\$")))
+         (cost (nth 1 parts)))
     (and (= (length parts) 4)
-         (string-match-p "\\`[0-9a-z=,]+\\'" (nth 1 parts))
+         (string-match-p "\\`[0-9a-f]+\\'" (nth 2 parts))
          (string-match-p "\\`[0-9a-f]+\\'" (nth 3 parts))
+         (pcase (nth 0 parts)
+           ("pbkdf2-sha256" (and (string-match-p "\\`[0-9]\\{1,8\\}\\'" cost)
+                                 (<= 1 (string-to-number cost) 10000000)))
+           ("scrypt" (and (string-match "\\`ln=\\([0-9]\\{1,2\\}\\),r=\\([0-9]\\{1,2\\}\\),p=\\([0-9]\\{1,2\\}\\)\\'" cost)
+                          (<= 1 (string-to-number (match-string 1 cost)) 20)
+                          (<= 1 (string-to-number (match-string 2 cost)) 32)
+                          (<= 1 (string-to-number (match-string 3 cost)) 16))))
          parts)))
+
+(defvar app-server-password-min-length 8
+  "The shortest password that is hashed.  A shorter one is refused: no
+hash makes a short password hard to guess.")
+
+(defun app-server--password-acceptable (password)
+  "Refuse the request if PASSWORD is not one to make a hash of."
+  (unless (and (stringp password) (>= (length password) app-server-password-min-length))
+    (app-server-refuse (format "A password needs at least %d characters" app-server-password-min-length)))
+  (when (> (length password) 1024)
+    (app-server-refuse "A password has at most 1024 characters")))
+
+(defun app-server-password-needs-rehash-p (hash)
+  "Non-nil if HASH was made with other settings than hashes are made with now.
+After `app-server-password-rounds' was raised or
+`app-server-password-algorithm' changed, old hashes still check; when a
+visitor has just signed in with one, the password is at hand to make a
+new one with (`app-server-password-hash-later') and store that."
+  (let ((parts (app-server--password-parse hash)))
+    (not (and parts
+              (equal (nth 0 parts) (symbol-name app-server-password-algorithm))
+              (equal (nth 1 parts) (app-server--password-parameters))))))
 
 (defun app-server--same-p (one other)
   "Non-nil if the strings ONE and OTHER are equal.
@@ -450,6 +484,7 @@ the first difference is."
 It reads \"pbkdf2-sha256$ROUNDS$SALT$HASH\".  Takes seconds, during which
 this Emacs does nothing else; in a handler use
 `app-server-password-hash-later'."
+  (app-server--password-acceptable password)
   (let ((salt (app-server-token 16)))
     (format "pbkdf2-sha256$%d$%s$%s" app-server-password-rounds salt
             (app-server--pbkdf2 (encode-coding-string password 'utf-8) salt app-server-password-rounds))))
@@ -478,7 +513,9 @@ another process under a native Emacs, the page in the studio's tab.")
 
 (defun app-server-password-hash-later (password function)
   "Hash PASSWORD without holding up the server; FUNCTION gets the hash.
-For use inside `app-server-defer'."
+For use inside `app-server-defer'.  A password shorter than
+`app-server-password-min-length' is refused."
+  (app-server--password-acceptable password)
   (let ((algorithm (symbol-name app-server-password-algorithm))
         (parameters (app-server--password-parameters))
         (salt (app-server-token 16)))
@@ -494,8 +531,11 @@ For use inside `app-server-defer'."
 FUNCTION gets t or nil.  For use inside `app-server-defer'."
   (let ((parts (app-server--password-parse hash))
         (function (app-server--guard function)))
-    (if (not parts)
-        (funcall function nil)
+    (if (not (and parts (stringp password) (<= (length password) 1024)))
+        ;; No such account, most likely.  The answer takes as long as a
+        ;; real check, or its speed would tell which names exist.
+        (funcall app-server-kdf-function "pbkdf2-sha256" (number-to-string app-server-password-rounds)
+                 "no password" "00" (lambda (_digest) (funcall function nil)))
       (funcall app-server-kdf-function (nth 0 parts) (nth 1 parts) password (nth 2 parts)
                (app-server--guard
                 (lambda (digest)
@@ -608,6 +648,178 @@ except Exception:
     (unless (equal (nth 0 lines) "pbkdf2-sha256") (kill-emacs 3))
     (princ (app-server--pbkdf2 (base64-decode-string (nth 3 lines)) (nth 2 lines)
                                (string-to-number (nth 1 lines))))))
+
+;;;; Signing in: sessions, and a limit on guesses
+
+;; What signing in needs besides the password check: something that says
+;; "this visitor is Ada" on later requests, and a stop to guessing.
+;;
+;;   ('("POST" "/api/login")
+;;    (let* ((sent (car (read-from-string body))) (name (car sent)) (password (cadr sent))
+;;           (address (app-server-visitor-address)))
+;;      (app-server-attempts-check name address)        ; 429 after five failures in ten minutes
+;;      (app-server-defer
+;;       (lambda (respond fail)
+;;         (app-server-password-check-later
+;;          password (app-stored-hash name)
+;;          (lambda (right)
+;;            (if (not right)
+;;                (progn (app-server-attempts-failed name address)
+;;                       (funcall fail "Wrong name or password" 401))
+;;              (app-server-attempts-clear name)
+;;              (app-server-session-start name)         ; a cookie, for thirty days
+;;              (funcall respond t))))))))
+;;   ('("GET" "/api/me") (or (app-server-session) (app-server-refuse "Sign in first" 401)))
+;;   ('("POST" "/api/logout") (app-server-session-end) t)
+;;
+;; Both are kept in an SQLite database of their own (.data/server.db), so
+;; several workers share them and a restart does not sign everyone out.
+;; In an Emacs without SQLite they are kept in memory.
+
+(defvar app-server-session-days 30 "How long a session lasts.")
+(defvar app-server-session-cookie "session" "The name of the session's cookie.")
+(defvar app-server-attempts-max 5
+  "How many failures are let through for one name or address.")
+(defvar app-server-attempts-seconds 600
+  "The time in which `app-server-attempts-max' failures stop further tries.")
+
+(defvar app-server--memory (make-hash-table :test 'equal)
+  "Sessions and attempts, in an Emacs without SQLite.")
+(defvar app-server--own-tables nil "Non-nil once the tables of server.db exist.")
+
+(defun app-server--own-database ()
+  "The database of sessions and attempts, or nil in an Emacs without SQLite."
+  (when (and (fboundp 'sqlite-available-p) (sqlite-available-p))
+    (let ((database (app-server-database "server")))
+      (unless app-server--own-tables
+        (sqlite-execute database "CREATE TABLE IF NOT EXISTS sessions (
+                                    token TEXT PRIMARY KEY, visitor TEXT NOT NULL, expires REAL NOT NULL)")
+        (sqlite-execute database "CREATE TABLE IF NOT EXISTS attempts (name TEXT NOT NULL, at REAL NOT NULL)")
+        (sqlite-execute database "CREATE INDEX IF NOT EXISTS attempts_name ON attempts (name)")
+        (setq app-server--own-tables t))
+      database)))
+
+(defun app-server--print (data)
+  (let ((print-length nil) (print-level nil)) (prin1-to-string data)))
+
+(defun app-server-session-start (visitor &optional days)
+  "Start a session for VISITOR: from now on `app-server-session' is VISITOR.
+VISITOR is Lisp data that says who it is: a name, a number, a plist.
+The browser gets a cookie with a random name for the session, good for
+DAYS (default `app-server-session-days'); the server keeps a hash of
+that name, so its database does not hold what would let someone in.
+Returns VISITOR."
+  (let* ((token (app-server-token))
+         (key (secure-hash 'sha256 token))
+         (seconds (* 86400 (or days app-server-session-days)))
+         (expires (+ (float-time) seconds))
+         (database (app-server--own-database)))
+    (if database
+        (progn
+          ;; Also the moment to forget what has run out.
+          (sqlite-execute database "DELETE FROM sessions WHERE expires < ?" (list (float-time)))
+          (sqlite-execute database "INSERT INTO sessions (token, visitor, expires) VALUES (?, ?, ?)"
+                          (list key (app-server--print visitor) expires)))
+      (puthash (concat "session " key) (cons (app-server--print visitor) expires) app-server--memory))
+    (app-server-set-cookie app-server-session-cookie token :max-age (round seconds))
+    visitor))
+
+(defun app-server--session-key ()
+  (let ((token (app-server-cookie app-server-session-cookie)))
+    (and token (string-match-p "\\`[0-9a-f]\\{64\\}\\'" token) (secure-hash 'sha256 token))))
+
+(defun app-server-session ()
+  "Who the visitor of the request being answered is, or nil if not signed in.
+The value is what `app-server-session-start' was given."
+  (let* ((key (app-server--session-key))
+         (database (and key (app-server--own-database)))
+         (found (cond ((not key) nil)
+                      (database (car (sqlite-select database "SELECT visitor, expires FROM sessions WHERE token = ?"
+                                                    (list key))))
+                      (t (let ((kept (gethash (concat "session " key) app-server--memory)))
+                           (and kept (list (car kept) (cdr kept))))))))
+    (and found (> (nth 1 found) (float-time))
+         (car (read-from-string (nth 0 found))))))
+
+(defun app-server-session-end ()
+  "End the session of the request being answered (sign out)."
+  (let* ((key (app-server--session-key))
+         (database (and key (app-server--own-database))))
+    (cond ((not key))
+          (database (sqlite-execute database "DELETE FROM sessions WHERE token = ?" (list key)))
+          (t (remhash (concat "session " key) app-server--memory))))
+  (app-server-delete-cookie app-server-session-cookie)
+  nil)
+
+(defun app-server-session-end-all (visitor)
+  "End every session of VISITOR, on every device.
+For when a password was changed: whoever knew the old one is out."
+  (let ((database (app-server--own-database))
+        (printed (app-server--print visitor)))
+    (if database
+        (sqlite-execute database "DELETE FROM sessions WHERE visitor = ?" (list printed))
+      (maphash (lambda (key kept)
+                 (when (and (string-prefix-p "session " key) (equal (car kept) printed))
+                   (remhash key app-server--memory)))
+               app-server--memory)))
+  nil)
+
+(defun app-server-visitor-address ()
+  "The address the visitor comes from, as the reverse proxy says, or nil.
+Without a proxy there is none to tell apart: everyone is this machine."
+  (let ((forwarded (app-server-header "x-forwarded-for")))
+    ;; The last entry is the one the proxy next to this server wrote.
+    (and forwarded (car (last (split-string forwarded "," t "[ \t]+"))))))
+
+(defun app-server--attempt-names (names)
+  "NAMES (strings, or nil for none) as they are kept: hashed."
+  (mapcar (lambda (name) (secure-hash 'sha256 (encode-coding-string (downcase name) 'utf-8)))
+          (delq nil (copy-sequence names))))
+
+(defun app-server--attempts (name since)
+  "The times of the failures for NAME (hashed) after SINCE, oldest first."
+  (let ((database (app-server--own-database)))
+    (if database
+        (mapcar #'car (sqlite-select database "SELECT at FROM attempts WHERE name = ? AND at > ? ORDER BY at"
+                                     (list name since)))
+      (seq-filter (lambda (at) (> at since)) (gethash (concat "attempts " name) app-server--memory)))))
+
+(defun app-server-attempts-check (&rest names)
+  "Refuse the request (429) if there were too many failures for one of NAMES.
+NAMES are strings that say whose attempt this is: the account's name,
+the visitor's address (`app-server-visitor-address'); nil is none.  Too
+many is `app-server-attempts-max' within `app-server-attempts-seconds'."
+  (let ((since (- (float-time) app-server-attempts-seconds)))
+    (dolist (name (app-server--attempt-names names))
+      (let ((failures (app-server--attempts name since)))
+        (when (>= (length failures) app-server-attempts-max)
+          (let ((wait (max 1 (ceiling (- (+ (car failures) app-server-attempts-seconds) (float-time))))))
+            (app-server-set-header "Retry-After" (number-to-string wait))
+            (app-server-refuse (format "Too many attempts. Try again in %d minutes" (ceiling wait 60.0))
+                               429)))))))
+
+(defun app-server-attempts-failed (&rest names)
+  "Note a failed attempt for each of NAMES (see `app-server-attempts-check')."
+  (let ((database (app-server--own-database))
+        (now (float-time)))
+    (when database
+      (sqlite-execute database "DELETE FROM attempts WHERE at < ?" (list (- now app-server-attempts-seconds))))
+    (dolist (name (app-server--attempt-names names))
+      (if database
+          (sqlite-execute database "INSERT INTO attempts (name, at) VALUES (?, ?)" (list name now))
+        (puthash (concat "attempts " name)
+                 (append (app-server--attempts name (- now app-server-attempts-seconds)) (list now))
+                 app-server--memory))))
+  nil)
+
+(defun app-server-attempts-clear (&rest names)
+  "Forget the failures for NAMES: for the account that has just signed in."
+  (let ((database (app-server--own-database)))
+    (dolist (name (app-server--attempt-names names))
+      (if database
+          (sqlite-execute database "DELETE FROM attempts WHERE name = ?" (list name))
+        (remhash (concat "attempts " name) app-server--memory))))
+  nil)
 
 ;;;; Answering later
 

@@ -274,6 +274,9 @@ try {
     ('("POST" "/api/logout") (app-server-delete-cookie "session") t)
     ('("POST" "/api/hash")
      (app-server-defer (lambda (respond _fail) (app-server-password-hash-later (car (read-from-string body)) respond))))
+    ('("POST" "/api/signin") (app-server-attempts-check "ada") (app-server-attempts-failed "ada") (app-server-session-start "ada"))
+    ('("GET" "/api/who") (app-server-session))
+    ('("POST" "/api/signout") (app-server-session-end) t)
     ('("POST" "/api/hash-scrypt")
      (app-server-defer (lambda (respond _fail)
        (let ((app-server-password-algorithm 'scrypt))
@@ -306,6 +309,15 @@ try {
   assert.equal((await viaServer("/api/me"))[0], 401);
   pass("server.el reads and sets headers and cookies; a refusal carries its status");
 
+  // Sessions and the limit on attempts, kept in the tab's own SQLite.
+  assert.equal((await viaServer("/api/who"))[1], "nil");
+  for (let attempt = 0; attempt < 5; attempt++) assert.equal((await viaServer("/api/signin", { method: "POST" }))[1], '"ada"');
+  assert.equal((await viaServer("/api/who"))[1], '"ada"');
+  assert.deepEqual((await viaServer("/api/signin", { method: "POST" })).slice(0, 2), [429, '"Too many attempts. Try again in 10 minutes"']);
+  await viaServer("/api/signout", { method: "POST" });
+  assert.equal((await viaServer("/api/who"))[1], "nil");
+  pass("server.el starts and ends sessions and stops a sixth attempt, in the tab as under a native Emacs");
+
   // Passwords: the same functions and the same hashes as under a native
   // Emacs; here the browser's Web Crypto does the arithmetic.
   const hashed = await viaServer("/api/hash", { method: "POST", body: '"pässword 日本語"' });
@@ -314,14 +326,15 @@ try {
   assert.equal(hashDigest, pbkdf2Sync("pässword 日本語", hashSalt, 600000, 32, "sha256").toString("hex"));
   assert.equal((await viaServer("/api/check", { method: "POST", body: `("pässword 日本語" ${hashed[1]})` }))[1], "t");
   assert.equal((await viaServer("/api/check", { method: "POST", body: `("pässword 日本" ${hashed[1]})` }))[1], "nil");
-  assert.deepEqual((await viaServer("/api/hash-scrypt", { method: "POST", body: '"x"' })).slice(0, 2), [400, '"This server cannot make scrypt hashes"']);
+  assert.deepEqual((await viaServer("/api/hash-scrypt", { method: "POST", body: '"long enough"' })).slice(0, 2), [400, '"This server cannot make scrypt hashes"']);
+  assert.deepEqual((await viaServer("/api/hash", { method: "POST", body: '"short"' })).slice(0, 2), [400, '"A password needs at least 8 characters"']);
   pass(`server.el hashes and checks a password in the tab: the page computes it (${Math.round(hashed[2])} ms for 600,000 rounds), and says so when asked for scrypt`);
 
   // Publishing: the project as a ZIP, and with git from inside Emacs.
   const zipNames = await js(`(async () => {
     const zip = await window.elispStudio.zip();
     const text = new TextDecoder("latin1").decode(zip);
-    const names = ["index.html", "app.el", "style.css", "server.el", "run.sh", "fetch-emacs.sh", "server/serve-project.el", "server/app-server.el", "README.txt",
+    const names = ["index.html", "app.el", "style.css", "server.el", "run.sh", "fetch-emacs.sh", "backup.sh", "server/serve-project.el", "server/app-server.el", "README.txt",
       "server/deploy/Caddyfile", "server/deploy/nginx.conf", "server/deploy/app.service"];
     return { magic: text.slice(0, 2), missing: names.filter((name) => !text.includes(name)), git: text.includes(".git/") };
   })()`);

@@ -5,6 +5,7 @@ An application written in Emacs Lisp, made with elisp-studio
   server.el                       the server side (if the application has one)
   run.sh                          run it: GNU Emacs is the web server
   fetch-emacs.sh                  optional: keep the browser's Emacs here too
+  backup.sh                       copy what the server keeps (.data/), while it runs
   server/                         what run.sh loads into Emacs
   server/deploy/                  for publishing: Caddy, nginx, systemd
 
