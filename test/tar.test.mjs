@@ -46,6 +46,8 @@ test("projectFiles takes one directory and leaves the editor's leftovers out", (
     entry("home/user/elisp-studio/app/#app.el#", "autosave"),
     entry("home/user/elisp-studio/app/.#app.el", "lock"),
     entry("home/user/elisp-studio/app/app.elc", "compiled"),
+    entry("home/user/elisp-studio/app/.git/HEAD", "ref: refs/heads/main"),
+    entry("home/user/elisp-studio/app/lib/.hidden", "x"),
     entry("home/user/elisp-studio/app/lib/util.el", "(provide 'util)"),
     entry("home/user/elisp-studio/other/app.el", "another project"),
     entry("home/user/notes.txt", "not a project"),

@@ -174,6 +174,37 @@ try {
   assert.equal((await messages()).length, 3);
   pass("an error signalled in server.el reaches the page as the response");
 
+  // Publishing: the project as a ZIP, and with git from inside Emacs.
+  const zipNames = await js(`(() => {
+    const zip = window.elispStudio.zip();
+    const text = new TextDecoder("latin1").decode(zip);
+    return { magic: text.slice(0, 2), names: ["index.html", "app.el", "style.css", "server.el"].filter((name) => text.includes(name)), git: text.includes(".git/") };
+  })()`);
+  assert.deepEqual(zipNames, { magic: "PK", names: ["index.html", "app.el", "style.css", "server.el"], git: false });
+  pass("the project downloads as a ZIP archive");
+
+  // C-c C-p commits; with a remote it pushes.  The remote here is a bare
+  // repository in Emacs's own filesystem.
+  await emacsEval('(message "publish-1-%s" (elisp-studio-publish "First version"))');
+  await screenUntil(/Committed\.  No remote yet|publish-1-t/, "a commit without a remote");
+  await emacsEval(`(progn
+    (let ((default-directory "/home/user/")) (process-file "git" nil nil nil "init" "-q" "--bare" "published.git"))
+    (let ((default-directory elisp-studio-project)) (process-file "git" nil nil nil "remote" "add" "origin" "/home/user/published.git"))
+    (message "publish-2-%s" (elisp-studio-publish "nothing new")))`);
+  await screenUntil(/Nothing new to commit; pushed|publish-2-t/, "the commit is pushed to the remote");
+  await editFile("style.css", "font-size: 22px;", "font-size: 24px;");
+  await screenUntil(/style\.css updated/, "the studio's word about the stylesheet has arrived in Emacs");
+  await emacsEval('(message "publish-3-%s" (elisp-studio-publish "Bigger title"))');
+  await screenUntil(/Committed and pushed|publish-3-t/, "a change is committed and pushed");
+  await emacsEval(`(with-temp-buffer
+    (let ((default-directory "/home/user/published.git/"))
+      (process-file "git" nil t nil "log" "--format=%s" "--all")
+      (process-file "git" nil t nil "show" "--stat" "--format=" "HEAD"))
+    (message "remote-has-%s" (replace-regexp-in-string "[[:space:]]+" "_" (string-trim (buffer-string)))))`);
+  await screenUntil(/remote-has-Bigger_title_First_version_style\.css/, "the remote has both commits, the last one touching style.css");
+  assert.equal(await js("[...window.elispStudio.files.keys()].some((path) => path.startsWith('.git'))"), false);
+  pass("C-c C-p in Emacs commits the project with git and pushes it to its remote");
+
   // An endless loop in the application: it is replaced, the editor lives.
   await editFile("app.el", '(h1 "Fixed")', '(h1 (progn (while t) "never"))');
   await until("/did not start/.test(document.querySelector('#status').textContent)", "the hang is noticed and the stuck application is taken away", 90_000);

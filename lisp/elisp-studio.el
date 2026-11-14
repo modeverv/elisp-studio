@@ -11,8 +11,10 @@
 ;;
 ;; and gives the project's buffers their commands:
 ;;
-;;   C-M-x   send the definition at point to the running application
-;;           (no need to save; components keep their state)
+;;   C-M-x     send the definition at point to the running application
+;;             (no need to save; components keep their state)
+;;   C-c C-p   publish: commit the project with git and push it
+;;             (`elisp-studio-publish')
 ;;
 ;; What the application's Emacs says about the code (compiler warnings,
 ;; errors) is shown in the buffer *elisp-studio*, in `compilation-mode':
@@ -114,9 +116,65 @@ again renders with the state it has.  The file need not be saved."
                         :text text)
     (message "Sent to the application: %s" (car (split-string text "\n")))))
 
+;;;; Publishing
+
+;; The project is a directory of plain files, and git runs inside this
+;; Emacs.  Publishing is a commit and, when the repository has a remote
+;; named origin, a push.  A project without server.el is a static site: a
+;; push to a GitHub repository with Pages enabled puts it on the web.
+;;
+;; Pushing over HTTPS goes through the wasmacs Chrome companion extension
+;; and needs credentials for the remote; see "Git clone, fetch and push" in
+;; the wasmacs README.  Once:
+;;
+;;   M-x shell
+;;   cd ~/elisp-studio/app
+;;   git remote add origin https://github.com/YOU/REPOSITORY.git
+
+(defconst elisp-studio--git-buffer "*elisp-studio-git*")
+
+(defun elisp-studio--git (&rest arguments)
+  "Run git with ARGUMENTS in the project.  Returns its exit status.
+The command and its output are appended to `elisp-studio--git-buffer'."
+  (let ((default-directory elisp-studio-project))
+    (with-current-buffer (get-buffer-create elisp-studio--git-buffer)
+      (goto-char (point-max))
+      (insert "$ git " (mapconcat #'identity arguments " ") "\n")
+      (let ((status (apply #'process-file "git" nil t nil arguments)))
+        (unless (bolp) (insert "\n"))
+        status))))
+
+(defun elisp-studio-publish (message)
+  "Commit the project with MESSAGE and push it to the remote origin.
+Without a remote the commit is made and the push is left out."
+  (interactive (list (read-string "Commit message: " "Update")))
+  (save-some-buffers t (lambda ()
+                         (and buffer-file-name
+                              (string-prefix-p elisp-studio-project (expand-file-name buffer-file-name)))))
+  (with-current-buffer (get-buffer-create elisp-studio--git-buffer)
+    (let ((inhibit-read-only t)) (erase-buffer)))
+  (unless (file-directory-p (expand-file-name ".git" elisp-studio-project))
+    (elisp-studio--git "init" "-q"))
+  (elisp-studio--git "add" "-A")
+  (let* ((committed (if (zerop (elisp-studio--git "diff" "--cached" "--quiet"))
+                        nil
+                      (zerop (elisp-studio--git "commit" "-q" "-m" message))))
+         (remote (zerop (elisp-studio--git "remote" "get-url" "origin")))
+         (pushed (and remote (zerop (elisp-studio--git "push" "-u" "origin" "HEAD"))))
+         (summary (cond ((and remote pushed) (if committed "Committed and pushed." "Nothing new to commit; pushed."))
+                        (remote "The push failed.")
+                        (committed "Committed.  No remote yet: git remote add origin URL, then publish again.")
+                        (t "Nothing new to commit, and no remote to push to."))))
+    (when (and remote (not pushed))
+      (display-buffer elisp-studio--git-buffer '((display-buffer-reuse-window display-buffer-at-bottom)
+                                                 (window-height . 8))))
+    (message "elisp-studio: %s" summary)
+    (if remote pushed committed)))
+
 (defvar elisp-studio-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-M-x") #'elisp-studio-eval-defun)
+    (define-key map (kbd "C-c C-p") #'elisp-studio-publish)
     map))
 
 (defun elisp-studio--saved ()

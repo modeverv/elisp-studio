@@ -10,6 +10,7 @@
 // application, whose components keep their state; a changed stylesheet is
 // swapped; a changed index.html starts the application again.
 import { projectFiles } from "./tar.js";
+import { createZip } from "./zip.js";
 
 const here = new URL("../", import.meta.url);                 // .../elisp-studio/
 // The sibling sites, on the same origin (GitHub Pages: modeverv.github.io/...).
@@ -456,6 +457,18 @@ function onEditorMessage(text) {
   }
 }
 
+// The project as one file, for wherever it should go.
+document.querySelector("#download").addEventListener("click", () => {
+  if (files.size === 0) return;
+  const url = URL.createObjectURL(new Blob([createZip(files)], { type: "application/zip" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "elisp-studio-app.zip";
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setStatus(`${files.size} files in elisp-studio-app.zip`, "ok");
+});
+
 document.querySelector("#restart").addEventListener("click", () => {
   if (files.size) queue = queue.then(() => startPreview(files, "restarted"));
 });
@@ -465,6 +478,7 @@ window.elispStudio = {
   get preview() { return preview; },
   get files() { return files; },
   get server() { return server; },
+  zip: () => createZip(files),
   editor: editorFrame,
 };
 

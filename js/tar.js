@@ -34,7 +34,7 @@ export function readTar(bytes) {
 /**
  * The text files below DIRECTORY (like "home/user/project") in the archive:
  * a Map from the path relative to it to the text.  Editor leftovers
- * (backups, auto-saves, lock files) are left out.
+ * (backups, auto-saves, lock files) and hidden files (.git) are left out.
  */
 export function projectFiles(bytes, directory) {
   const root = `${directory.replace(/^\/+|\/+$/g, "")}/`;
@@ -43,7 +43,9 @@ export function projectFiles(bytes, directory) {
     if (!path.startsWith(root)) continue;
     const relative = path.slice(root.length);
     const base = relative.slice(relative.lastIndexOf("/") + 1);
-    if (base.endsWith("~") || base.startsWith("#") || base.startsWith(".#") || base.endsWith(".elc")) continue;
+    if (base.endsWith("~") || base.startsWith("#") || base.endsWith(".elc")) continue;
+    // Hidden files and directories (.git, lock files) are not the project's content.
+    if (relative.split("/").some((part) => part.startsWith("."))) continue;
     files.set(relative, decoder.decode(content));
   }
   return files;
