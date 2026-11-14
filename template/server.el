@@ -19,9 +19,9 @@
   (pcase (list method path)
     ('("GET" "/api/messages") (app-messages))
     ('("POST" "/api/messages")
-     ;; The body is a printed string.  `read' makes data of it; nothing a
-     ;; page sends is ever evaluated.
-     (let ((text (car (read-from-string body))))
+     ;; The body is a printed string.  `app-server-data' makes data of it;
+     ;; nothing a page sends is ever evaluated.
+     (let ((text (app-server-data body)))
        (unless (and (stringp text) (not (string-empty-p (string-trim text))))
          (error "A message needs some text"))
        (app-server-write "messages" (append (app-messages) (list (string-trim text))))))

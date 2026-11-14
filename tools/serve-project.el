@@ -110,16 +110,28 @@ only for names with a link in them.)"
 (defun serve-project--file (path)
   "The file of the project that the URL PATH names, or nil."
   (let* ((root serve-project--root)
-         (file (expand-file-name (substring (decode-coding-string (url-unhex-string path) 'utf-8) 1) root)))
-    (when (file-directory-p file) (setq file (expand-file-name "index.html" file)))
-    (and (string-prefix-p root file)
-         (let ((relative (substring file (length root))))
-           (and (not (string-match-p "\\(?:\\`\\|/\\)\\." relative))
-                ;; The server's own program is not for download.
-                (not (string-match-p "\\`server\\(?:\\.el\\|/\\)" relative))))
-         (file-regular-p file)
-         (serve-project--inside-p file)
-         file)))
+         (name (decode-coding-string (url-unhex-string path) 'utf-8))
+         ;; Emacs can treat names like /ssh:host:/file as files on other
+         ;; machines, and others as compressed or encrypted.  Not here: a
+         ;; name in a request is a file of this project or nothing.
+         (file-name-handler-alist nil)
+         (case-fold-search t)
+         (file (and (not (string-match-p "[\0-\x1f\x7f]" name))
+                    (expand-file-name (substring name 1) root))))
+    ;; (The project directory itself comes back without its final slash.)
+    (when (equal file (directory-file-name root)) (setq file root))
+    ;; The name is judged before the disk is asked anything about it.
+    (when (and file (string-prefix-p root file))
+      (let ((relative (substring file (length root))))
+        (and (not (string-match-p "\\(?:\\`\\|/\\)\\." relative))
+             ;; The server's own program and the scripts that run it are
+             ;; not for download.
+             (not (string-match-p "\\`server\\(?:\\.elc?\\|/\\)" relative))
+             (not (string-match-p "\\.sh\\'" relative))
+             (progn (when (file-directory-p file) (setq file (expand-file-name "index.html" file)))
+                    (file-regular-p file))
+             (serve-project--inside-p file)
+             file)))))
 
 (defconst serve-project--piece (* 1024 1024) "Files are sent in pieces of this size.")
 
@@ -141,6 +153,11 @@ body is that file's content, read and sent piece by piece."
                 (concat "HTTP/1.1 " status "\r\n"
                         (and (not bare) (format "Content-Type: %s\r\nContent-Length: %d\r\n" type size))
                         "X-Content-Type-Options: nosniff\r\n"
+                        ;; Not inside a frame of another site (clickjacking),
+                        ;; and no word to other sites about where one came from.
+                        "X-Frame-Options: SAMEORIGIN\r\n"
+                        "Content-Security-Policy: frame-ancestors 'self'; form-action 'self'; base-uri 'self'; object-src 'none'\r\n"
+                        "Referrer-Policy: same-origin\r\n"
                         (mapconcat (lambda (header) (concat (car header) ": " (cdr header) "\r\n")) headers "")
                         (if keep "Connection: keep-alive\r\n" "Connection: close\r\n")
                         "\r\n")
@@ -157,7 +174,8 @@ body is that file's content, read and sent piece by piece."
                (buffer-string)))
             (setq sent (+ sent serve-project--piece)))))
       (when (and serve-project-log (process-get process :method))
-        (message "serve-project: %s %s %s %dms" (process-get process :method) (process-get process :path)
+        (message "serve-project: %s %s %s %dms" (process-get process :method)
+                 (replace-regexp-in-string "[^!-~]" "?" (process-get process :path))
                  (substring status 0 3) (* 1000 (- (float-time) (process-get process :started)))))
       (cond ((not (process-live-p process)))
             ;; A body that was refused is still on its way.  Closing now
@@ -173,6 +191,7 @@ body is that file's content, read and sent piece by piece."
             (t
              (process-put process :busy nil)
              (process-put process :method nil)
+             (process-put process :served t)
              (process-put process :since (float-time))
              ;; The next request may be here already.
              (unless (string-empty-p (process-get process :input))
@@ -189,6 +208,41 @@ body is that file's content, read and sent piece by piece."
 (defun serve-project--sentinel (process _event)
   "A visitor who leaves in the middle of an upload leaves nothing behind."
   (unless (process-live-p process) (serve-project--forget-upload process)))
+
+(defvar serve-project-max-connections 512
+  "How many connections are open at most.
+One more, and an idle one is closed.  (An Emacs
+cannot have many more than a thousand; a reverse proxy uses a few.)")
+
+(defun serve-project--connections ()
+  "The connections of visitors."
+  (seq-filter (lambda (process)
+                (and (process-get process :serve-project) (eq (process-status process) 'open)))
+              (process-list)))
+
+(defun serve-project--accepted (_server connection _message)
+  "A visitor has connected.  Make room if that is one connection too many."
+  ;; (When no more can be accepted, this is called without a connection.)
+  (when (processp connection)
+    (process-put connection :since (float-time))
+    (let ((all (serve-project--connections)))
+      (when (> (length all) serve-project-max-connections)
+        (let ((idle (seq-filter (lambda (process)
+                                  (not (or (eq process connection) (process-get process :busy)
+                                           (process-get process :upload-left))))
+                                all)))
+          ;; First those that never asked for anything (a flood of silent
+          ;; connections is made of them), then those that rest between
+          ;; requests; among each, the one that waited longest.
+          (delete-process
+           (if idle
+               (car (sort idle (lambda (one other)
+                                 (let ((new-one (not (process-get one :served)))
+                                       (new-other (not (process-get other :served))))
+                                   (if (eq new-one new-other)
+                                       (< (or (process-get one :since) 0) (or (process-get other :since) 0))
+                                     new-one)))))
+             connection)))))))
 
 (defun serve-project--refuse (process status &optional coming)
   "Answer what is not a request this server takes, and close the connection.
@@ -220,7 +274,9 @@ COMING is how many bytes of its body have not arrived yet."
   "Send the answer of server.el: STATUS, TEXT (printed Lisp data), HEADERS.
 TEXT is (:file FILE :type TYPE :name NAME) when the answer is a file."
   (let ((line (format "%d %s" status (or (cdr (assq status serve-project--reasons)) "Error")))
-        (headers (cons '("Cache-Control" . "no-store") headers)))
+        ;; Answers of the application are for its own pages to read.
+        (headers (append '(("Cache-Control" . "no-store") ("Cross-Origin-Resource-Policy" . "same-origin"))
+                         headers)))
     (if (stringp text)
         (serve-project--respond process line "application/x-emacs-lisp; charset=utf-8"
                                 (encode-coding-string text 'utf-8) headers close)
@@ -241,20 +297,49 @@ TEXT is (:file FILE :type TYPE :name NAME) when the answer is a file."
                                (format "http://localhost:%d" serve-project-port))
                          serve-project-origins)))
 
+(defun serve-project--own-host-p (host)
+  "Non-nil if HOST, the Host header of a request, is a name of this server.
+A page of another site can make its own name point to this machine (DNS
+rebinding) and then read what this server answers; its requests carry
+that name."
+  (or (not host)
+      (member (downcase host)
+              (append (list (format "127.0.0.1:%d" serve-project-port) (format "localhost:%d" serve-project-port)
+                            (format "[::1]:%d" serve-project-port))
+                      (mapcan (lambda (origin)
+                                (let ((host (downcase (replace-regexp-in-string "\\`[a-z]+://" "" origin))))
+                                  ;; With and without the port: proxies pass either.
+                                  (list host (replace-regexp-in-string ":[0-9]+\\'" "" host))))
+                              serve-project-origins)))))
+
+(defun serve-project--foreign-p (headers)
+  "Non-nil if the request with HEADERS was made by a page of another site."
+  (let ((origin (cdr (assoc "origin" headers))))
+    (or (and origin (not (serve-project--own-origin-p origin)))
+        ;; Browsers say so themselves, also for requests without an Origin
+        ;; (a picture, a link): no page of another site has business here.
+        (equal (cdr (assoc "sec-fetch-site" headers)) "cross-site"))))
+
 (defun serve-project--handle (process method target headers body &optional upload)
   (let ((path (car (split-string target "?")))
-        (origin (cdr (assoc "origin" headers)))
         (request-headers headers))
     (cond
+     ((not (serve-project--own-host-p (cdr (assoc "host" headers))))
+      (serve-project--respond process "421 Misdirected Request" "text/plain" "this server is not that host"))
      ((string-prefix-p "/api/" path)
-      (if (and origin (not (serve-project--own-origin-p origin)))
+      (if (serve-project--foreign-p headers)
           (serve-project--answer process 403 "\"requests from other sites are refused\"" nil)
         ;; A handler may answer later (`app-server-defer'): then there is no
         ;; answer yet, the connection stays open and this server goes on.
         (let ((answer (app-server-respond
                        method target (decode-coding-string body 'utf-8)
                        (lambda (status text headers) (serve-project--answer process status text headers))
-                       headers upload)))
+                       ;; What a proxy says about the visitor counts only
+                       ;; when there is a proxy; otherwise the visitor wrote it.
+                       (if serve-project-origins
+                           headers
+                         (seq-remove (lambda (header) (string-prefix-p "x-forwarded-" (car header))) headers))
+                       upload)))
           (when answer (serve-project--answer process (aref answer 0) (aref answer 1) (aref answer 2))))))
      ((not (member method '("GET" "HEAD")))
       (serve-project--respond process "405 Method Not Allowed" "text/plain" "method not allowed"))
@@ -323,11 +408,11 @@ server.el is asked once per request, when the headers are there."
   (let ((asked (process-get process :asked)))
     (if asked
         (car asked)
-      (let* ((origin (cdr (assoc "origin" headers)))
-             (answer (and (> length 0)
+      (let* ((answer (and (> length 0)
                           (member (nth 0 request) '("POST" "PUT"))
                           (string-prefix-p "/api/" (nth 1 request))
-                          (or (not origin) (serve-project--own-origin-p origin))
+                          (serve-project--own-host-p (cdr (assoc "host" headers)))
+                          (not (serve-project--foreign-p headers))
                           (app-server-upload-accept (nth 0 request) (nth 1 request) length headers))))
         (process-put process :asked (list answer))
         answer))))
@@ -363,18 +448,28 @@ server.el is asked once per request, when the headers are there."
        (t
         (let* ((lines (split-string (substring input 0 end) "\r\n"))
                (request (split-string (car lines) " "))
-               (headers (delq nil (mapcar (lambda (line)
-                                            (let ((colon (string-search ":" line)))
-                                              (and colon
-                                                   (cons (downcase (substring line 0 colon))
-                                                         (string-trim (substring line (1+ colon)))))))
-                                          (cdr lines))))
-               (stated (cdr (assoc "content-length" headers)))
+               ;; A header is "Name: value" and nothing else.  Lines that
+               ;; another server might read differently (a space before the
+               ;; colon, a continuation line, control characters) end the
+               ;; request: two servers that disagree about where a request
+               ;; ends can be made to hand one visitor another's answer.
+               (malformed nil)
+               (headers (mapcar (lambda (line)
+                                  (if (string-match "\\`\\([!#$%&'*+.^_`|~0-9A-Za-z-]+\\):[ \t]*\\([^\0-\x08\x0a-\x1f\x7f]*\\)\\'" line)
+                                      (cons (downcase (match-string 1 line)) (string-trim-right (match-string 2 line)))
+                                    (setq malformed t)
+                                    (cons "" "")))
+                                (cdr lines)))
+               (lengths (seq-filter (lambda (header) (equal (car header) "content-length")) headers))
+               (stated (cdr (car lengths)))
                (length (if stated (string-to-number stated) 0))
                (start (+ end 4))
                (upload nil))
           (cond
            ((not (and (= (length request) 3)
+                      (not malformed)
+                      (<= (length lengths) 1)
+                      (let ((case-fold-search nil)) (string-match-p "\\`[A-Z]+\\'" (nth 0 request)))
                       (string-prefix-p "/" (nth 1 request))
                       (string-match-p "\\`HTTP/1\\.[01]\\'" (nth 2 request))
                       (or (not stated) (string-match-p "\\`[0-9]+\\'" stated))))
@@ -443,7 +538,12 @@ server.el is asked once per request, when the headers are there."
                  (when (> waited serve-project-request-timeout)
                    (serve-project--refuse process "408 Request Timeout")))
                 ((string-empty-p (or (process-get process :input) ""))
-                 (when (> waited serve-project-idle-timeout) (delete-process process)))
+                 ;; A connection that has asked for something may rest; one
+                 ;; that never said a word is not kept for long.
+                 (when (> waited (if (process-get process :served)
+                                     serve-project-idle-timeout
+                                   serve-project-request-timeout))
+                   (delete-process process)))
                 ((> waited serve-project-request-timeout)
                  (serve-project--refuse process "408 Request Timeout"))))))))
 
@@ -470,7 +570,17 @@ many."
         serve-project--root serve-project-directory
         serve-project--true-root (file-name-as-directory (file-truename serve-project-directory))
         app-server-data-directory (expand-file-name ".data/" serve-project-directory)
-        app-server-shared (> serve-project-workers 1))
+        app-server-shared (> serve-project-workers 1)
+        ;; What goes wrong inside is for the log, not for the visitor.
+        app-server-explain-errors nil)
+  ;; Uploads that a server that was stopped left half done.
+  (let ((uploads (expand-file-name "uploads/" app-server-data-directory)))
+    (when (and (file-directory-p uploads) (= serve-project-workers 1))
+      (dolist (file (directory-files uploads t "\\`[^.]")) (ignore-errors (delete-file file)))))
+  (when (and (> serve-project-workers 1)
+             (not (and (fboundp 'sqlite-available-p) (sqlite-available-p))))
+    (message "serve-project: WARNING: this Emacs has no SQLite, so each of the %d workers keeps its own sessions: a visitor signed in at one is unknown to the others"
+             serve-project-workers))
   (let ((server (expand-file-name "server.el" serve-project-directory))
         (compiled (expand-file-name "server.elc" app-server-data-directory)))
     (when (file-readable-p server)
@@ -489,8 +599,7 @@ many."
         (make-network-process :name "serve-project" :server 256 :host "127.0.0.1" :family 'ipv4
                               :service serve-project-port :coding 'binary :noquery t
                               :plist '(:serve-project t :input "")
-                              :log (lambda (_server connection _message)
-                                     (process-put connection :since (float-time)))
+                              :log #'serve-project--accepted
                               :filter #'serve-project--filter
                               :sentinel #'serve-project--sentinel))
   (when serve-project--sweeper (cancel-timer serve-project--sweeper))

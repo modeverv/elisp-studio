@@ -42,6 +42,6 @@
      (let ((name (app-name (app-server-parameter "name"))))
        (app-server-send-file (app-server-file name) :name name)))
     ('("POST" "/api/files/remove")
-     (delete-file (app-server-file (app-name (car (read-from-string body)))))
+     (delete-file (app-server-file (app-name (app-server-data body))))
      (app-shelf))
     (_ (signal 'file-missing (list "No such API" path)))))

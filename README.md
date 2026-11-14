@@ -80,22 +80,14 @@ A project with a `server.el` has a server. The file defines one function:
 
 It returns Lisp data, which the page gets printed and reads back; an error it signals is the response. Around the three arguments:
 
+- `(app-server-data body)`: the body as Lisp data. Use this and not `read`: Emacs's reader keeps every new name it meets as a symbol for good, so a visitor could fill the server's memory with names. `app-server-data` lets through strings, numbers, lists, vectors and the symbols this Emacs already knows, and nothing a visitor sends is ever evaluated.
 - `(app-server-parameter "name")`: the value of `?name=...` in the request.
 - `(app-server-header "name")`, `(app-server-cookie "name")`: what came with the request.
 - `(app-server-set-header "Name" "value")`, `(app-server-set-cookie "name" "value" :max-age 3600)`, `(app-server-delete-cookie "name")`: what goes with the answer. A cookie is hidden from the page's scripts, `SameSite=Lax`, and `Secure` when the visitor came over HTTPS, unless told otherwise.
 - `(app-server-refuse "Sign in first" 401)`: answer with that message and status.
 - `(app-server-token)`: a random name nobody can guess, for a session.
 
-Signing in is those put together:
-
-```elisp
-('("POST" "/api/login")
- (let ((session (app-server-token)))
-   (sqlite-execute (app-server-database) "INSERT INTO sessions (name, visitor) VALUES (?, ?)"
-                   (list session (app-check-password body)))
-   (app-server-set-cookie "session" session :max-age (* 30 24 3600))
-   t))
-```
+Signing in is made of these; the section "Signing in" below has it whole.
 
 The server can keep data in two ways:
 
@@ -179,23 +171,41 @@ The page sends the file itself as the body, not a form. In elisp-react that is o
 
 [`examples/upload`](examples/upload) is a shelf of files made of this ([try it](https://modeverv.github.io/elisp-studio/?example=upload)). Measured: 300 MB arrive in 1.2 seconds (240 MB per second) while the server's memory grows by 30 MB, come back in 0.8 seconds with the same checksum, and other requests are answered at their usual rate meanwhile, also while two visitors download slowly. In the studio's tab a file travels as base64 and is kept in memory: 32 MB at most, enough to try an upload out.
 
-### Passwords
-
-A password is not kept; a hash that is slow to make is, so that a stolen database cannot be searched for passwords at a billion guesses a second. `server.el` asks for one and for a check of one, and does not see where the arithmetic is done:
+### Signing in
 
 ```elisp
 ('("POST" "/api/login")
- (let* ((sent (car (read-from-string body))) (name (car sent)) (password (cadr sent)))
+ (let* ((sent (app-server-data body)) (name (car sent)) (password (cadr sent))
+        (address (app-server-visitor-address)))
+   (app-server-attempts-check name address)             ; 429 after five failures in ten minutes
    (app-server-defer
     (lambda (respond fail)
       (app-server-password-check-later
        password (app-stored-hash name)
        (lambda (right)
          (if (not right)
-             (funcall fail "Wrong name or password" 401)
-           (app-server-set-cookie "session" (app-new-session name))
+             (progn (app-server-attempts-failed name address)
+                    (funcall fail "Wrong name or password" 401))
+           (app-server-attempts-clear name)
+           (app-server-session-start name)              ; a cookie, for thirty days
            (funcall respond t))))))))
+('("GET" "/api/me") (or (app-server-session) (app-server-refuse "Sign in first" 401)))
+('("POST" "/api/logout") (app-server-session-end) t)
 ```
+
+- **Sessions.** `(app-server-session-start VISITOR)` gives the browser a cookie with a random name for the session and keeps a hash of that name with VISITOR (any Lisp data: a name, a number, a plist) and an expiry, so the database holds nothing that would let someone in. `(app-server-session)` is VISITOR on later requests, or nil. `(app-server-session-end)` signs out; `(app-server-session-end-all VISITOR)` signs out everywhere, for when a password was changed.
+- **A limit on guesses.** `(app-server-attempts-check NAME ADDRESS ...)` refuses with 429 and `Retry-After` when there were five failures in ten minutes for one of its arguments (`app-server-attempts-max`, `app-server-attempts-seconds`); `-failed` notes a failure, `-clear` forgets them. Counting by account stops guesses at one account from many addresses, counting by address stops one address trying many accounts. `(app-server-visitor-address)` is what the reverse proxy says; without a proxy everyone is this machine and only the account counts.
+- **Short passwords** (under `app-server-password-min-length`, 8) are refused when a hash is to be made: no hash makes those hard to guess.
+- **Old hashes.** After the rounds were raised or the algorithm changed, `(app-server-password-needs-rehash-p HASH)` says which hashes to make again, at the one moment the password is at hand: right after it checked.
+- **Not telling which names exist.** A check for an account that does not exist takes as long as one for an account that does.
+
+Sessions and failures are in an SQLite database of their own, `.data/server.db`: workers share them, and a restart signs nobody out.
+
+An application for people who already have an account somewhere needs none of this. Let the proxy sign them in (Caddy's `forward_auth` or `basic_auth`, oauth2-proxy in front of nginx) and read who it is from the header the proxy sets, `(app-server-header "x-forwarded-user")` or whatever it is called there. The proxy must overwrite that header on every request, or a visitor could set it.
+
+### Passwords
+
+A password is not kept; a hash that is slow to make is, so that a stolen database cannot be searched for passwords at a billion guesses a second. `server.el` asks for one (`app-server-password-hash-later`) and for a check of one (`app-server-password-check-later`, above), and does not see where the arithmetic is done.
 
 `(app-server-password-hash-later PASSWORD FUNCTION)` makes the hash to store. Who computes it depends on where the server runs:
 
@@ -233,14 +243,18 @@ The download brings the configurations in `server/deploy/`: a `Caddyfile` (four 
 | Who the visitor is | `(app-server-header "x-forwarded-for")` and `"x-forwarded-proto"` are the proxy's word, which can be believed because only this machine reaches the server. Both shipped configurations overwrite what a visitor claims in those headers. |
 | Cookies, sign-in | See above. Requests from other sites cannot use them: the origin check, and `SameSite=Lax`. |
 | Kept connections | The proxy's connections stay open between requests, and requests sent ahead are answered in order. |
-| Limits | A body of at most 1 MB (`serve-project-max-body`), 16 KB of headers; a body without a stated length is refused (nginx and Caddy state it). |
-| Slow or silent visitors | Half a request is given 20 seconds, an idle connection 180 (longer than the proxies keep theirs). |
-| Files | Sent with an `ETag`; an unchanged file is answered with `304`. `server.el`, `server/`, `.data/` and hidden files are never sent, nor anything a symbolic link leads to outside the project. |
+| Limits | A body of at most 1 MB (`serve-project-max-body`), 16 KB of headers, 512 connections; a body without a stated length is refused (nginx and Caddy state it), and so is a request whose headers could be read two ways. |
+| Its own name | A request under another `Host` than the server's own address or the published one is refused (421): a page elsewhere cannot point its own domain at the server and read it. |
+| Slow or silent visitors | Half a request is given 20 seconds, and so is a connection that never says anything; one that rests between requests 180 (longer than the proxies keep theirs). |
+| Files | Sent with an `ETag`; an unchanged file is answered with `304`. `server.el`, `server/`, `.data/`, hidden files and `*.sh` are never sent, nor anything a symbolic link leads to outside the project. Every answer says it is not to be shown in a frame of another site. |
 | Log | One line per request on standard error: method, path, status, milliseconds. |
 | Several cores | `WORKERS=4 ./run.sh` starts four Emacs processes on four ports and the proxy spreads the requests over them (the shipped configurations say how). They share `.data/`: SQLite switches to its write-ahead log and waits for a busy database, `app-server-write` replaces files in one step. What a handler keeps in a Lisp variable is known to one worker only, so sessions belong in the database. If a worker ends, the script ends them all, for systemd to start again. |
 | Uploads | Caddy passes a body of any size on as it arrives; for nginx, `client_max_body_size` in the shipped file sets the limit. |
+| Backups | `./backup.sh` copies `.data/` while the server runs; the databases are copied by SQLite itself (`VACUUM INTO`), which gives a whole database also in the middle of a write. |
 
 Tried with Caddy 2.11 (HTTPS with HTTP/2) and nginx 1.30 in front, with the shipped configurations: pages, sign-in, deferred answers, compression and `304` all pass through, a 300 MB file goes up and comes back intact through both (to four workers, which all see it afterwards), and a load of 20,000 requests through Caddy (22,000 per second) had no failures. Six minutes of mixed load (2.5 million requests, among them 370,000 SQLite inserts) ended without an error. In a second run the number of live Lisp objects after a collection was the same after each kind of load as at the start (no leak in Lisp), while the process grew from 59 MB to 105 MB and stayed there. That is fifteen minutes, not weeks. The systemd unit has not been run.
+
+[doc/security.md](doc/security.md) is the record of a security check of this server (OWASP ZAP, about a hundred hand-made requests, an independent reading of the code): two serious problems and nine lesser ones were found and fixed, and it says what was left as it is. In short: a request could make the server open an SSH connection to a machine of the sender's choice, and a visitor could fill its memory; neither is possible any more, and a test fails if either comes back.
 
 What is not there: streaming answers and WebSockets, forms that upload (`multipart/form-data`; a page sends the file itself), and ranges of a file (a video cannot be skipped through). Nobody has attacked this server in earnest: it is a few hundred lines of Emacs Lisp behind a proxy, for applications among friends.
 
@@ -291,6 +305,7 @@ Deferring itself costs nothing to speak of: a handler that defers and answers at
   index.html, app.el, style.css, server.el    the project
   run.sh              ./run.sh [PORT]: Emacs becomes the web server of this directory
   fetch-emacs.sh      optional: download the browser's Emacs into vendor/ (about 160 MB, needs curl)
+  backup.sh           copy what the server keeps (.data/) while it runs
   server/             what run.sh loads into Emacs (the HTTP server and app-server.el)
   README.txt
   ```

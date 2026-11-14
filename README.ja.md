@@ -80,22 +80,14 @@ Emacs でプロジェクトのファイルを開いているときに使える�
 
 関数は Lisp のデータを返します。ページはそれを印字された形で受け取り、読み戻します。関数がエラーを起こすと、そのエラーがレスポンスになります。3つの引数のほかに、次のものが使えます。
 
+- `(app-server-data body)`：本文を Lisp のデータとして読みます。`read` ではなく、これを使ってください。Emacs のリーダーは、初めて見る名前をすべてシンボルとして保持し続けるので、閲覧者が名前を大量に送るだけでサーバーのメモリを埋められます。`app-server-data` が通すのは、文字列、数値、リスト、ベクタ、そしてこの Emacs がすでに知っているシンボルだけです。閲覧者が送ったものが評価されることはありません。
 - `(app-server-parameter "name")`：リクエストの `?name=...` の値。
 - `(app-server-header "name")`、`(app-server-cookie "name")`：リクエストに付いてきたヘッダーと Cookie。
 - `(app-server-set-header "Name" "value")`、`(app-server-set-cookie "name" "value" :max-age 3600)`、`(app-server-delete-cookie "name")`：応答に付けるもの。Cookie は、指定しないかぎり、ページのスクリプトからは見えず、`SameSite=Lax` で、閲覧者が HTTPS で来た場合は `Secure` になります。
 - `(app-server-refuse "Sign in first" 401)`：そのメッセージとステータスで断ります。
 - `(app-server-token)`：推測できないランダムな名前。セッションに使います。
 
-ログインは、これらの組み合わせです。
-
-```elisp
-('("POST" "/api/login")
- (let ((session (app-server-token)))
-   (sqlite-execute (app-server-database) "INSERT INTO sessions (name, visitor) VALUES (?, ?)"
-                   (list session (app-check-password body)))
-   (app-server-set-cookie "session" session :max-age (* 30 24 3600))
-   t))
-```
+ログインは、これらを組み合わせて作ります。全体は、下の「ログイン」の節にあります。
 
 サーバーがデータを保持する方法は2つあります。
 
@@ -179,23 +171,41 @@ studio の中では、サーバーはブラウザのタブの中の3つ目の Em
 
 [`examples/upload`](examples/upload) は、これで作ったファイル置き場です（[試す](https://modeverv.github.io/elisp-studio/?example=upload)）。計測では、300 MB が 1.2 秒で届き（毎秒 240 MB）、その間のサーバーのメモリ増加は 30 MB でした。同じファイルは 0.8 秒で戻り、チェックサムも一致しました。その間も、2人が低速でダウンロードしている間も、他のリクエストへの応答速度は変わりませんでした。studio のタブの中では、ファイルは base64 で運ばれてメモリに置かれます。上限は 32 MB で、アップロードを試すには十分です。
 
-### パスワード
-
-パスワードそのものは保存しません。保存するのは、計算に時間のかかるハッシュです。データベースが盗まれても、毎秒10億回の速さでパスワードを探されないようにするためです。`server.el` はハッシュの作成と照合を頼むだけで、計算がどこで行われるかを意識しません。
+### ログイン
 
 ```elisp
 ('("POST" "/api/login")
- (let* ((sent (car (read-from-string body))) (name (car sent)) (password (cadr sent)))
+ (let* ((sent (app-server-data body)) (name (car sent)) (password (cadr sent))
+        (address (app-server-visitor-address)))
+   (app-server-attempts-check name address)             ; 10分間に5回失敗していたら 429
    (app-server-defer
     (lambda (respond fail)
       (app-server-password-check-later
        password (app-stored-hash name)
        (lambda (right)
          (if (not right)
-             (funcall fail "Wrong name or password" 401)
-           (app-server-set-cookie "session" (app-new-session name))
+             (progn (app-server-attempts-failed name address)
+                    (funcall fail "Wrong name or password" 401))
+           (app-server-attempts-clear name)
+           (app-server-session-start name)              ; Cookie を発行する（30日間）
            (funcall respond t))))))))
+('("GET" "/api/me") (or (app-server-session) (app-server-refuse "Sign in first" 401)))
+('("POST" "/api/logout") (app-server-session-end) t)
 ```
+
+- **セッション**：`(app-server-session-start VISITOR)` は、セッションのランダムな名前を Cookie としてブラウザに渡します。サーバーが保存するのは、その名前のハッシュと、VISITOR（名前、番号、plist など任意の Lisp データ）と、期限です。データベースには、それだけでログインできてしまう情報が残りません。以後のリクエストでは、`(app-server-session)` が VISITOR を返します（ログインしていなければ nil）。`(app-server-session-end)` でログアウトします。`(app-server-session-end-all VISITOR)` は、その人のセッションをすべての端末で終了させます。パスワードを変更したときに使います。
+- **試行回数の制限**：`(app-server-attempts-check NAME ADDRESS ...)` は、引数のどれかについて10分間に5回の失敗があると、429 と `Retry-After` で断ります（`app-server-attempts-max`、`app-server-attempts-seconds`）。`-failed` で失敗を記録し、`-clear` で消します。アカウント単位で数えると、多数のアドレスから1つのアカウントを狙う総当たりが止まります。アドレス単位で数えると、1つのアドレスから多数のアカウントを試す行為が止まります。`(app-server-visitor-address)` は、リバースプロキシが伝えてきたアドレスです。プロキシがない場合は全員がこのマシンに見えるので、アカウント単位の制限だけが効きます。
+- **短いパスワード**：`app-server-password-min-length`（8文字）より短いパスワードは、ハッシュを作る時点で断ります。短いパスワードは、どんなハッシュでも守れないためです。
+- **古いハッシュ**：回数を増やしたあとや方式を変えたあとは、`(app-server-password-needs-rehash-p HASH)` で、作り直すべきハッシュかどうかが分かります。作り直せるのは、パスワードが手元にある瞬間、つまり照合に成功した直後です。
+- **存在する名前を教えない**：存在しないアカウントの照合にも、存在するアカウントの照合と同じ時間をかけます。
+
+セッションと失敗の記録は、専用の SQLite データベース `.data/server.db` に入ります。ワーカー間で共有され、再起動しても誰もログアウトされません。
+
+利用者がすでに別の場所にアカウントを持っているアプリケーションでは、これらは不要です。ログインはプロキシに任せ（Caddy の `forward_auth` や `basic_auth`、nginx の手前に置く oauth2-proxy など）、誰が来たかは、プロキシが付けるヘッダーから `(app-server-header "x-forwarded-user")` のように読み取ります（ヘッダー名はプロキシによります）。プロキシが、そのヘッダーをすべてのリクエストで上書きするように設定してください。そうしないと、閲覧者が自分でそのヘッダーを付けられます。
+
+### パスワード
+
+パスワードそのものは保存しません。保存するのは、計算に時間のかかるハッシュです。データベースが盗まれても、毎秒10億回の速さでパスワードを探されないようにするためです。`server.el` はハッシュの作成（`app-server-password-hash-later`）と照合（上の `app-server-password-check-later`）を頼むだけで、計算がどこで行われるかを意識しません。
 
 `(app-server-password-hash-later PASSWORD FUNCTION)` は、保存するハッシュを作ります。誰が計算するかは、サーバーがどこで動いているかで決まります。
 
@@ -233,14 +243,18 @@ PUBLIC_ORIGIN=https://example.com ./run.sh
 | 閲覧者が誰か | `(app-server-header "x-forwarded-for")` と `"x-forwarded-proto"` はプロキシからの情報です。サーバーに届くのはこのマシンからの接続だけなので、信用できます。同梱の設定はどちらも、閲覧者が自分で付けたこれらのヘッダーを上書きします。 |
 | Cookie とログイン | 上記のとおりです。オリジンの確認と `SameSite=Lax` により、他のサイトからのリクエストでは使えません。 |
 | 接続の維持 | プロキシからの接続は、リクエストの間も開いたままです。先に送られたリクエストには、順番に応答します。 |
-| 上限 | 本文は 1 MB まで（`serve-project-max-body`）、ヘッダーは 16 KB まで。長さの指定がない本文は断ります（nginx と Caddy は長さを付けて転送します）。 |
-| 遅い、または黙っている接続 | 途中まで送られたリクエストは20秒、何も送らない接続は180秒で切ります（プロキシが接続を保つ時間より長くしてあります）。 |
-| ファイル | `ETag` を付けて送り、変わっていないファイルには `304` で応答します。`server.el`、`server/`、`.data/`、隠しファイル、およびシンボリックリンクでプロジェクトの外に出るものは送りません。 |
+| 上限 | 本文は 1 MB まで（`serve-project-max-body`）、ヘッダーは 16 KB まで、接続は 512 本まで。長さの指定がない本文は断ります（nginx と Caddy は長さを付けて転送します）。ヘッダーが二通りに読めるリクエストも断ります。 |
+| サーバー自身の名前 | `Host` がサーバー自身のアドレスでも公開アドレスでもないリクエストは断ります（421）。よそのページが自分のドメインをこのサーバーに向けて内容を読み取る、ということができません。 |
+| 遅い、または黙っている接続 | 途中まで送られたリクエストは20秒、一度も何も送ってこない接続も20秒で切ります。リクエストの合間に休んでいる接続は180秒です（プロキシが接続を保つ時間より長くしてあります）。 |
+| ファイル | `ETag` を付けて送り、変わっていないファイルには `304` で応答します。`server.el`、`server/`、`.data/`、隠しファイル、`*.sh`、およびシンボリックリンクでプロジェクトの外に出るものは送りません。すべての応答に、他のサイトのフレーム内に表示させない指定を付けます。 |
 | ログ | 標準エラー出力に、リクエストごとに1行（メソッド、パス、ステータス、ミリ秒）。 |
 | 複数のコア | `WORKERS=4 ./run.sh` で、4つの Emacs プロセスが4つのポートで起動し、プロキシがリクエストを振り分けます（方法は同梱の設定に書いてあります）。プロセスは `.data/` を共有します。SQLite は先行書き込みログ（WAL）に切り替わり、使用中のデータベースを待ちます。`app-server-write` はファイルを一度に置き換えます。ハンドラが Lisp の変数に持たせたものは、1つのワーカーしか知りません。セッションはデータベースに置いてください。ワーカーが1つ終了すると、スクリプトが全ワーカーを終了させ、systemd がまとめて起動し直します。 |
 | アップロード | Caddy は、どの大きさの本文も届いた分から転送します。nginx では、同梱ファイルの `client_max_body_size` が上限です。 |
+| バックアップ | `./backup.sh` は、サーバーを動かしたまま `.data/` をコピーします。データベースは SQLite 自身がコピーするので（`VACUUM INTO`）、書き込みの最中でも完全な状態のものが得られます。 |
 
 同梱の設定を使い、Caddy 2.11（HTTPS、HTTP/2）と nginx 1.30 を手前に置いて確認しました。ページ、ログイン、あとからの応答、圧縮、`304` がすべて通ります。300 MB のファイルは、どちらを経由しても、送って取り戻した内容が一致しました（送り先は4つのワーカーで、送ったあとは全ワーカーからそのファイルが見えます）。Caddy 経由の2万リクエストの負荷（毎秒2万2千件）で失敗はありませんでした。6分間の混合負荷（250万リクエスト、うち SQLite への挿入が37万件）はエラーなしで終わりました。2回目の計測では、ガベージコレクション後に生きている Lisp オブジェクトの数が、どの種類の負荷のあとも開始時と同じでした（Lisp 側のリークはありません）。プロセスのメモリは 59 MB から 105 MB まで増え、そこで止まりました。確認したのは15分間であり、数週間ではありません。systemd のユニットは実行していません。
+
+[doc/security.md](doc/security.md)（英語）は、このサーバーのセキュリティ検査の記録です。OWASP ZAP、手作りの約100件のリクエスト、独立したコード監査で調べ、重大な問題2件と軽微な問題9件を見つけて修正しました。そのままにしたものも書いてあります。要点は次のとおりです。以前は、リクエスト1つで、送信者が選んだマシンへの SSH 接続をサーバーに開かせることができ、また閲覧者がサーバーのメモリを埋めることができました。どちらも現在はできず、再発するとテストが失敗します。
 
 ないもの：ストリーミング応答と WebSocket、フォームによるアップロード（`multipart/form-data`。ページはファイルそのものを送ります）、ファイルの一部分だけの送信（動画の途中からの再生はできません）。このサーバーを本気で攻撃した人はまだいません。プロキシの後ろに置く数百行の Emacs Lisp であり、身内向けのアプリケーションのためのものです。
 
@@ -291,6 +305,7 @@ Caddy の後ろに複数のワーカーを置いた場合（`ab -k -c 40`）、�
   index.html, app.el, style.css, server.el    プロジェクト
   run.sh              ./run.sh [PORT]。Emacs がこのディレクトリの Web サーバーになる
   fetch-emacs.sh      任意。ブラウザ用の Emacs を vendor/ にダウンロードする（約160MB、curl が必要）
+  backup.sh           サーバーが保持するもの（.data/）を、動かしたままコピーする
   server/             run.sh が Emacs に読み込ませるもの（HTTP サーバーと app-server.el）
   README.txt
   ```

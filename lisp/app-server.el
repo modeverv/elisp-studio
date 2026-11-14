@@ -6,7 +6,8 @@
 ;;
 ;; METHOD is "GET", "POST", ...; PATH is the request's path, "/api/...",
 ;; without its query (`app-server-parameter' gives the values of
-;; ?name=value); BODY is the text of the request.  The function returns Lisp
+;; ?name=value); BODY is the text of the request (`app-server-data' reads it
+;; as Lisp data).  The function returns Lisp
 ;; data, which is printed as the response (the page reads it back with
 ;; `read').  An error it signals becomes a 400 response with the error's
 ;; message, the error `file-missing' a 404.
@@ -35,6 +36,7 @@
 ;;
 ;; About the request and the answer, beyond the three arguments:
 ;;
+;;   `app-server-data'                            the body, read as data
 ;;   `app-server-parameter'                       ?name=value
 ;;   `app-server-refuse'                          answer with an error status
 ;;   `app-server-header', `app-server-cookie'     what came with the request
@@ -148,6 +150,78 @@ text from what a page sent."
 (defun app-server-parameter (name &optional default)
   "The value of ?NAME=... in the request being answered, or DEFAULT."
   (or (cadr (assoc name (app-server--request-parameters (app-server--current-request)))) default))
+
+;; What a page sends is data, never a program.  Reading it with Emacs's
+;; reader has a cost of its own, though: every name the reader has not seen
+;; before becomes a symbol that Emacs keeps for good, so a visitor who
+;; sends bodies full of new names fills the server's memory (measured: 80
+;; requests, 500 MB).  `app-server-data' reads without that.
+
+(defun app-server-data (text &optional default)
+  "The Lisp data that TEXT, the body of a request, is the printed form of.
+An empty TEXT is DEFAULT.  The data is strings, numbers, lists, vectors
+and symbols that this Emacs already knows (the keywords and names
+server.el itself uses, nil and t).  Anything else is refused: a name
+nobody here uses, a structure that goes round in circles or is too
+large, an object that is not plain data.  Nothing a visitor sends stays
+in Emacs afterwards.  Use this, not `read', on what comes from outside."
+  (if (string-match-p "\\`[ \t\r\n]*\\'" text)
+      default
+    (let* ((own (obarray-make 31))
+           (value (let ((obarray own))
+                    (condition-case nil
+                        (car (read-from-string text))
+                      (error (error "The request is not Lisp data")))))
+           (left 200000))
+      (cl-labels
+          ((clean (data depth)
+             (when (or (> depth 64) (< (setq left (1- left)) 0))
+               (error "The request holds too much data"))
+             (cond ((stringp data) (substring-no-properties data))
+                   ((numberp data) data)
+                   ((symbolp data)
+                    (let ((name (symbol-name data)))
+                      (cond ((equal name "nil") nil)
+                            ((intern-soft name))      ; the symbol this Emacs knows by that name
+                            (t (error "The request names something unknown: %s"
+                                      (truncate-string-to-width name 40))))))
+                   ((consp data)
+                    ;; Along the list in a loop, so that a long list is not a deep one.
+                    (let ((result nil))
+                      (while (consp data)
+                        (push (clean (car data) (1+ depth)) result)
+                        (setq data (cdr data))
+                        (when (< (setq left (1- left)) 0) (error "The request holds too much data")))
+                      (let ((list (nreverse result)))
+                        (when data (setcdr (last list) (clean data (1+ depth))))
+                        list)))
+                   ((and (vectorp data) (not (byte-code-function-p data)))
+                    (apply #'vector (mapcar (lambda (element) (clean element (1+ depth))) data)))
+                   (t (error "The request holds something that is not data")))))
+        (clean value 0)))))
+
+(defvar app-server-explain-errors t
+  "Non-nil: the text of any error in a handler is the response.
+That is for writing the application.  A server for others sets it to nil:
+then only what server.el says on purpose (`error', `app-server-refuse')
+reaches the visitor, and what went wrong inside (a file's path, a
+database's message) goes to the log.")
+
+(defun app-server--file-missing-text (err)
+  "What the visitor is told about ERR, a `file-missing' condition.
+server.el signals it on purpose for what is not there; Emacs signals it
+for a file it did not find, with the file's whole name."
+  (if (or app-server-explain-errors (not (member "No such file or directory" (cdr err))))
+      (error-message-string err)
+    (message "app-server: %s" (error-message-string err))
+    "Not found"))
+
+(defun app-server--error-text (err)
+  "What the visitor is told about ERR, a condition a handler signalled."
+  (cond ((or app-server-explain-errors (memq (car err) '(error user-error)))
+         (error-message-string err))
+        (t (message "app-server: %s" (error-message-string err))
+           (if (eq (car err) 'file-missing) "Not found" "The request could not be answered"))))
 
 (define-error 'app-server-refusal "The request is refused")
 
@@ -307,8 +381,8 @@ request) or, when server.el refused it, the answer [STATUS TEXT HEADERS]."
       (condition-case err
           (and (funcall 'app-server-upload-p method (if question (substring path 0 question) path) size) t)
         (app-server-refusal (funcall answer (nth 2 err) (nth 1 err)))
-        (file-missing (funcall answer 404 (error-message-string err)))
-        (error (funcall answer 400 (error-message-string err)))))))
+        (file-missing (funcall answer 404 (app-server--file-missing-text err)))
+        (error (funcall answer 400 (app-server--error-text err)))))))
 
 (defun app-server-upload-file ()
   "For the host: a new temporary file to take an upload into."
@@ -346,7 +420,7 @@ is: that Emacs has no better source.)"
 ;; second.
 ;;
 ;;   ('("POST" "/api/login")
-;;    (let* ((sent (car (read-from-string body))) (name (car sent)) (password (cadr sent)))
+;;    (let* ((sent (app-server-data body)) (name (car sent)) (password (cadr sent)))
 ;;      (app-server-defer
 ;;       (lambda (respond fail)
 ;;         (app-server-password-check-later
@@ -655,7 +729,7 @@ except Exception:
 ;; "this visitor is Ada" on later requests, and a stop to guessing.
 ;;
 ;;   ('("POST" "/api/login")
-;;    (let* ((sent (car (read-from-string body))) (name (car sent)) (password (cadr sent))
+;;    (let* ((sent (app-server-data body)) (name (car sent)) (password (cadr sent))
 ;;           (address (app-server-visitor-address)))
 ;;      (app-server-attempts-check name address)        ; 429 after five failures in ten minutes
 ;;      (app-server-defer
@@ -855,9 +929,13 @@ An error it signals fails that request instead of being lost."
             (apply function arguments))
         (app-server-refusal
          (when fail (funcall fail (nth 1 err) (nth 2 err))))
+        (file-missing
+         (if fail
+             (funcall fail (app-server--file-missing-text err) 404)
+           (message "app-server: %s" (error-message-string err))))
         (error
          (if fail
-             (funcall fail (error-message-string err))
+             (funcall fail (app-server--error-text err))
            (message "app-server: %s" (error-message-string err))))))))
 
 ;; What there is to wait for.  The two hosts do these differently: a native
@@ -993,8 +1071,8 @@ is there.  A host that passes no LATER cannot wait: the request fails."
                     (t (app-server--start-deferred value later))))
           (funcall answer 404 "This application has no server.el"))
       (app-server-refusal (funcall answer (nth 2 err) (nth 1 err)))
-      (file-missing (funcall answer 404 (error-message-string err)))
-      (error (funcall answer 400 (error-message-string err))))))
+      (file-missing (funcall answer 404 (app-server--file-missing-text err)))
+      (error (funcall answer 400 (app-server--error-text err))))))
 
 (defun app-server--start-deferred (deferred later)
   "Run DEFERRED's function; LATER (STATUS TEXT HEADERS) gets the answer, once.
@@ -1019,7 +1097,8 @@ Returns nil, or [STATUS TEXT HEADERS] if the function answered right away."
         (condition-case err
             (funcall (app-server--deferred-function deferred) respond fail)
           (app-server-refusal (funcall fail (nth 1 err) (nth 2 err)))
-          (error (funcall fail (error-message-string err))))
+          (file-missing (funcall fail (app-server--file-missing-text err) 404))
+          (error (funcall fail (app-server--error-text err))))
         ;; In a browser tab the page gives up by itself.
         (unless (or answered app-server--tab)
           (setq timeout (run-at-time app-server-deferred-timeout nil fail

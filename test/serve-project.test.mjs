@@ -193,7 +193,7 @@ test("behind a reverse proxy: the public origin, forwarded headers, cookies, kep
 (defun app-server-handle (method path body)
   (pcase (list method path)
     ('("POST" "/api/login")
-     (let ((name (car (read-from-string body))) (session (app-server-token)))
+     (let ((name (app-server-data body)) (session (app-server-token)))
        (unless (equal name "ada") (app-server-refuse "Who are you?" 403))
        (puthash session name app-sessions)
        (app-server-set-cookie "session" session :max-age 3600)
@@ -212,17 +212,17 @@ test("behind a reverse proxy: the public origin, forwarded headers, cookies, kep
     ('("GET" "/api/visitor") (list (app-server-header "x-forwarded-for") (app-server-header "X-Forwarded-Proto")))
     ('("POST" "/api/length") (length body))
     ('("POST" "/api/hash")
-     (app-server-defer (lambda (respond _fail) (app-server-password-hash-later (car (read-from-string body)) respond))))
+     (app-server-defer (lambda (respond _fail) (app-server-password-hash-later (app-server-data body) respond))))
     ('("POST" "/api/hash-scrypt")
      (app-server-defer (lambda (respond _fail)
        (let ((app-server-password-algorithm 'scrypt) (app-server-password-scrypt "ln=14,r=8,p=1"))
-         (app-server-password-hash-later (car (read-from-string body)) respond)))))
+         (app-server-password-hash-later (app-server-data body) respond)))))
     ('("POST" "/api/check")
-     (let* ((sent (car (read-from-string body))) (password (car sent)) (hash (cadr sent)))
+     (let* ((sent (app-server-data body)) (password (car sent)) (hash (cadr sent)))
        (app-server-defer (lambda (respond fail)
          (app-server-password-check-later
           password hash (lambda (right) (if right (funcall respond t) (funcall fail "Wrong password" 401))))))))
-    ('("POST" "/api/split") (app-server-set-header "X-Evil" (car (read-from-string body))) t)
+    ('("POST" "/api/split") (app-server-set-header "X-Evil" (app-server-data body)) t)
     (_ (signal 'file-missing (list "No such API" path)))))
 (setq serve-project-request-timeout 1 serve-project-idle-timeout 2 serve-project-max-body 2000
       app-server-password-rounds 300000 app-server-password-jobs 2)
@@ -234,7 +234,8 @@ test("behind a reverse proxy: the public origin, forwarded headers, cookies, kep
   const proxy = createHttpServer((request, response) => {
     const upstream = httpRequest({
       host: "127.0.0.1", port: server.port, agent, method: request.method, path: request.url,
-      headers: { ...request.headers, "x-forwarded-for": "203.0.113.7", "x-forwarded-proto": "https" },
+      // (As the shipped configurations do: the public name as Host, the visitor's address and scheme.)
+      headers: { ...request.headers, host: "app.example", "x-forwarded-for": "203.0.113.7", "x-forwarded-proto": "https" },
     }, (answer) => {
       sockets.add(answer.socket);
       response.writeHead(answer.statusCode, answer.headers);
@@ -324,7 +325,7 @@ test("behind a reverse proxy: the public origin, forwarded headers, cookies, kep
     assert.deepEqual((await ask("/app.el", { headers: { "If-None-Match": page[2].get("etag") } })).slice(0, 2), [200, ";; changed\n"]);
 
     // What a connection may and may not send.
-    const get = (path, more = "") => `GET ${path} HTTP/1.1\r\nHost: x\r\n${more}\r\n`;
+    const get = (path, more = "") => `GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\n${more}\r\n`;
     const statuses = (text) => [...text.matchAll(/HTTP\/1\.1 (\d{3}) /g)].map((match) => Number(match[1]));
     // Two requests sent at once are answered in order; the connection stays open.
     const two = await raw(server.port, get("/api/visitor") + get("/api/nothing"));
@@ -446,7 +447,7 @@ test("signing in: sessions that last, a limit on guesses, old hashes renewed, a 
 (defun app-keep-hash (name hash)
   (app-server-write "accounts" (cons (cons name hash) (assoc-delete-all name (app-server-read "accounts")))))
 (defun app-server-handle (method path body)
-  (let* ((sent (and (not (string-empty-p body)) (car (read-from-string body))))
+  (let* ((sent (and (not (string-empty-p body)) (app-server-data body)))
          (name (car-safe sent)) (password (car-safe (cdr-safe sent))))
     (pcase (list method path)
       ('("POST" "/api/register")
@@ -477,7 +478,9 @@ test("signing in: sessions that last, a limit on guesses, old hashes renewed, a 
       ('("POST" "/api/logout-everywhere") (app-server-session-end-all (app-server-session)) t)
       (_ (signal 'file-missing (list "No such API" path))))))
 `);
-  let server = await startServer(directory, { WORKERS: "2" });
+  // (A proxy is declared, so that what it says about the visitor's address counts.)
+  const environment = { WORKERS: "2", PUBLIC_ORIGIN: "https://app.example" };
+  let server = await startServer(directory, environment);
   const workers = () => [server.origin, `http://127.0.0.1:${server.port + 1}`];
   const ready = async () => {
     for (let attempt = 0; ; attempt++) {
@@ -522,7 +525,7 @@ test("signing in: sessions that last, a limit on guesses, old hashes renewed, a 
 
     // The session outlives the server.
     await server.stop();
-    server = await startServer(directory, { WORKERS: "2" });
+    server = await startServer(directory, environment);
     await ready();
     assert.deepEqual(brief(await ada("/api/me")), [200, '"ada"']);
 
@@ -574,6 +577,132 @@ test("signing in: sessions that last, a limit on guesses, old hashes renewed, a 
     assert.equal((await readFile(join(saved, "server.db"))).subarray(0, 15).toString("latin1"), "SQLite format 3");
     assert.match(await readFile(join(saved, "accounts.eld"), "utf8"), /"eve"/);
     assert.equal((await fetch(`${server.origin}/.backups/`)).status, 404);
+  } finally {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("what the security check found stays fixed", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "elisp-studio-security-"));
+  await cp(join(root, "template"), directory, { recursive: true });
+  await cp(join(root, "tools/project/run.sh"), join(directory, "run.sh"));
+  await writeFile(join(directory, "server.el"), `;;; -*- lexical-binding: t; -*-
+(setq serve-project-max-connections 20 serve-project-request-timeout 1)
+(defun app-server-handle (method path body)
+  (pcase (list method path)
+    ('("GET" "/api/hello") "hello")
+    ('("POST" "/api/data") (app-server-data body))
+    ('("GET" "/api/address") (app-server-visitor-address))
+    ('("GET" "/api/missing-file") (with-temp-buffer (insert-file-contents "/nowhere/secret/place.txt") t))
+    ('("GET" "/api/broken") (car 1))
+    ('("GET" "/api/broken-later") (app-server-defer (lambda (_respond _fail) (app-server-after 0.01 (lambda () (car 1))))))
+    ('("GET" "/api/said") (error "Said on purpose"))
+    (_ (signal 'file-missing (list "No such API" path)))))
+`);
+  const server = await startServer(directory);
+  const host = `127.0.0.1:${server.port}`;
+  const request = (line, headers = "", body = "") => `${line} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n${headers}\r\n${body}`;
+  const answer = async (data, wait) => {
+    const { received, closed } = await raw(server.port, data, wait);
+    return { status: Number(/^HTTP\/1\.1 (\d{3})/.exec(received)?.[1] || 0), body: received.split("\r\n\r\n").slice(1).join("\r\n\r\n"), received, closed };
+  };
+  const status = async (data, wait) => (await answer(data, wait)).status;
+  const alive = async () => (await fetch(`${server.origin}/api/hello`, { signal: AbortSignal.timeout(3000) })).status;
+  try {
+    // Names that Emacs would take for files on other machines (/ssh:host:/...) are names
+    // like any other: nothing is connected to (a listener here would see it), nothing hangs.
+    let contacted = false;
+    const listener = createServer((socket) => { contacted = true; socket.destroy(); });
+    await new Promise((resolve) => listener.listen(0, "127.0.0.1", resolve));
+    const started = performance.now();
+    for (const path of [`//ssh:probe@127.0.0.1%23${listener.address().port}:/etc/passwd`, "//sudo::/etc/shadow", "//scp:example.invalid:/x", "/x/..//ssh:example.invalid:/x"]) {
+      assert.equal(await status(request(`GET ${path}`), 5000), 404, path);
+    }
+    assert.ok(performance.now() - started < 2000, "answered at once");
+    assert.equal(contacted, false);
+    listener.close();
+    // Control characters in a name: not a file, not a failure.
+    assert.equal(await status(request("GET /app.el%00.html")), 404);
+    assert.equal(await status(request("GET /%0d%0aX:y")), 404);
+    // The scripts that run the server are not for download; the page's files are.
+    assert.deepEqual([await status(request("GET /run.sh")), await status(request("GET /RUN.SH")), await status(request("GET /app.el"))], [404, 404, 200]);
+
+    // A request under another name than this server's (a page that points its own name here): refused.
+    for (const name of ["evil.example", `evil.example:${server.port}`, `127.0.0.1:${server.port}.evil.example`]) {
+      assert.equal(await status(`GET /api/hello HTTP/1.1\r\nHost: ${name}\r\nConnection: close\r\n\r\n`), 421, name);
+      assert.equal(await status(`GET /app.el HTTP/1.1\r\nHost: ${name}\r\nConnection: close\r\n\r\n`), 421, name);
+    }
+    assert.equal(await status(`GET /api/hello HTTP/1.1\r\nHost: LOCALHOST:${server.port}\r\nConnection: close\r\n\r\n`), 200);
+    // A request a browser says comes from a page of another site: refused, with or without an Origin.
+    assert.equal(await status(request("GET /api/hello", "Sec-Fetch-Site: cross-site\r\n")), 403);
+    assert.equal(await status(request("GET /api/hello", "Sec-Fetch-Site: same-origin\r\n")), 200);
+    assert.equal(await status(request("GET /api/hello", "Sec-Fetch-Site: none\r\n")), 200);
+
+    // Requests whose end two servers could see differently: refused, connection closed.
+    const framed = (headers, body = "12345") => answer(`POST /api/data HTTP/1.1\r\nHost: ${host}\r\n${headers}\r\n${body}`).then(({ status, closed }) => [status, closed]);
+    assert.deepEqual(await framed("Content-Length: 5\r\nContent-Length: 0\r\n"), [400, true]);
+    assert.deepEqual(await framed("Content-Length: 5\r\nContent-Length: 5\r\n"), [400, true]);
+    assert.deepEqual(await framed("Content-Length : 5\r\n"), [400, true]);
+    assert.deepEqual(await framed("Transfer-Encoding : chunked\r\nContent-Length: 5\r\n"), [400, true]);
+    assert.deepEqual(await framed("X: y\r\n Content-Length: 5\r\n"), [400, true]);
+    assert.deepEqual(await framed("X: a\0b\r\nContent-Length: 5\r\n"), [400, true]);
+    assert.deepEqual(await framed("No colon here\r\nContent-Length: 5\r\n"), [400, true]);
+    assert.equal(await status(`get /api/hello HTTP/1.1\r\nHost: ${host}\r\n\r\n`), 400);
+    assert.deepEqual((await framed("Content-Length: 5\r\nConnection: close\r\n", '"abc"')).slice(0, 1), [200]);
+
+    // The answers say they are not to be shown inside a page of another site.
+    const page = await fetch(`${server.origin}/`);
+    assert.equal(page.headers.get("x-frame-options"), "SAMEORIGIN");
+    assert.equal(page.headers.get("content-security-policy"), "frame-ancestors 'self'; form-action 'self'; base-uri 'self'; object-src 'none'");
+    assert.equal((await fetch(`${server.origin}/api/hello`)).headers.get("cross-origin-resource-policy"), "same-origin");
+    assert.equal(page.headers.get("referrer-policy"), "same-origin");
+
+    // What goes wrong inside a handler is for the log; the visitor is told what server.el says on purpose.
+    assert.deepEqual([await status(request("GET /api/said")), (await answer(request("GET /api/said"))).body], [400, '"Said on purpose"']);
+    assert.equal((await answer(request("GET /api/missing-file"))).body, '"Not found"');
+    assert.equal((await answer(request("GET /api/broken"))).body, '"The request could not be answered"');
+    assert.equal((await answer(request("GET /api/broken-later"), 1500)).body, '"The request could not be answered"');
+    assert.equal((await answer(request("GET /api/nothing"))).body, '"No such API: /api/nothing"');
+    assert.match(server.log(), /app-server: Opening input file: No such file or directory, \/nowhere\/secret\/place\.txt/);
+    // Without a proxy, nobody can say where a visitor comes from: not the visitor either.
+    assert.equal((await answer(request("GET /api/address", "X-Forwarded-For: 203.0.113.9\r\n"))).body, "nil");
+
+    // The body as data: plain data comes through, the rest is refused, and names
+    // nobody here uses do not pile up in the server's memory.
+    const data = async (text) => { const response = await fetch(`${server.origin}/api/data`, { method: "POST", body: text }); return [response.status, await response.text()]; };
+    assert.deepEqual(await data('("ada" 1 2.5 [t nil] (car . "x"))'), [200, '("ada" 1 2.5 [t nil] (car . "x"))']);
+    assert.deepEqual(await data("(zz-never-heard-of)"), [400, '"The request names something unknown: zz-never-heard-of"']);
+    assert.deepEqual(await data("#1=(a . #1#)"), [400, '"The request holds too much data"']);
+    assert.deepEqual(await data("#s(hash-table data (a 1))"), [400, '"The request holds something that is not data"']);
+    assert.deepEqual(await data("((("), [400, '"The request is not Lisp data"']);
+    const pid = execFileSync("pgrep", ["-f", `serve-project-port ${server.port}\\)`], { encoding: "utf8" }).trim().split("\n")[0];
+    const memory = () => Number(execFileSync("ps", ["-o", "rss=", "-p", pid], { encoding: "utf8" })) / 1024;
+    let count = 0;
+    const flood = async () => {
+      for (let round = 0; round < 20; round++) {
+        await data(`(${Array.from({ length: 30000 }, () => `q${(count++).toString(36)}z`).join(" ")})`);
+      }
+    };
+    await flood();                                             // (the first bodies warm the server up)
+    const before = memory();
+    await flood();
+    await flood();
+    const grown = memory() - before;
+    assert.ok(grown < 40, `1.2 million unknown names later the server is ${Math.round(grown)} MB larger`);
+
+    // More connections than may be open: the longest idle ones go, requests are still answered;
+    // a connection that never says anything is not kept.
+    const silent = await Promise.all(Array.from({ length: 60 }, () => new Promise((resolve) => {
+      const socket = connect(server.port, "127.0.0.1");
+      socket.on("connect", () => resolve(socket));
+      socket.on("error", () => resolve(socket));
+    })));
+    assert.equal(await alive(), 200);
+    await new Promise((resolve) => setTimeout(resolve, 3200));
+    assert.equal(silent.filter((socket) => !socket.destroyed && socket.readyState === "open").length, 0);
+    for (const socket of silent) socket.destroy();
+    assert.equal(await alive(), 200);
   } finally {
     await server.stop();
     await rm(directory, { recursive: true, force: true });
