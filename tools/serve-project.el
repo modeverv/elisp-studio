@@ -24,6 +24,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'bytecomp)
 
 (defvar serve-project-directory default-directory "The project.")
 (defvar serve-project-port 8018)
@@ -143,10 +144,21 @@
   (when (process-live-p serve-project--process) (delete-process serve-project--process))
   (setq serve-project-directory (file-name-as-directory (expand-file-name serve-project-directory))
         app-server-data-directory (expand-file-name ".data/" serve-project-directory))
-  (let ((server (expand-file-name "server.el" serve-project-directory)))
-    (when (file-readable-p server) (load server nil t)))
+  (let ((server (expand-file-name "server.el" serve-project-directory))
+        (compiled (expand-file-name "server.elc" app-server-data-directory)))
+    (when (file-readable-p server)
+      ;; Byte-compiled, handlers that compute run several times faster.  The
+      ;; compiled file goes to the data directory, which is not served.
+      (make-directory app-server-data-directory t)
+      (if (let ((byte-compile-dest-file-function (lambda (_source) compiled))
+                (byte-compile-verbose nil))
+            (ignore-errors (byte-compile-file server)))
+          (load compiled nil t)
+        (load server nil t))))
   (setq serve-project--process
-        (make-network-process :name "serve-project" :server t :host "127.0.0.1" :family 'ipv4
+        ;; The number is the length of the queue of connections that wait to
+        ;; be accepted (Emacs's default, 5, turns a burst of requests away).
+        (make-network-process :name "serve-project" :server 256 :host "127.0.0.1" :family 'ipv4
                               :service serve-project-port :coding 'binary :noquery t
                               :filter #'serve-project--filter))
   (message "serve-project: http://127.0.0.1:%d/ (%s)" serve-project-port serve-project-directory))

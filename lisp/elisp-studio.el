@@ -38,6 +38,7 @@
 (require 'json)
 (require 'compile)
 (require 'flymake)
+(require 'bytecomp)
 
 (defconst elisp-studio-project "/home/user/elisp-studio/app/"
   "The directory of the project.")

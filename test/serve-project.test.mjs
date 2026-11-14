@@ -6,6 +6,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { existsSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -57,6 +58,13 @@ test("the template project runs under a native Emacs: files, server.el, kept dat
     assert.equal((await text("/app.el"))[1], await readFile(join(directory, "app.el"), "utf8"));
     assert.equal((await text("/server.el"))[0], 404);          // not for download
     assert.equal((await text("/.data/messages.eld"))[0], 404);  // nor the data
+
+    // A burst: many requests at once are all answered (Emacs's default
+    // queue of five waiting connections would turn some of them away).
+    const burst = await Promise.all(Array.from({ length: 100 }, () => fetch(`${server.origin}/api/messages`).then((response) => response.status)));
+    assert.deepEqual([...new Set(burst)], [200]);
+    // server.el runs byte-compiled.
+    assert.equal(existsSync(join(directory, ".data/server.elc")), true);
 
     // Another server process finds what the first one kept.
     await server.stop();

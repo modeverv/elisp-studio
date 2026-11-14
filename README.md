@@ -106,6 +106,22 @@ The same project runs for real under a native Emacs, which then is the web serve
 
 It serves the project's files and answers `/api/...` with the same `server.el`; what the server keeps goes to `.data/` in the project. The page's Emacs Lisp still runs in the visitor's browser.
 
+### How fast is that server?
+
+It is one Emacs with one thread, working like Node.js: connections wait in the operating system, Emacs takes one request, runs the handler to its end, answers, takes the next. `server.el` is byte-compiled when the server starts. Measured with ApacheBench on an Apple M4 Max, Emacs 31.1, 10 connections at a time (`ab -n 5000 -c 10`):
+
+| Request | Requests per second |
+|---|---|
+| a handler that returns a small plist | 16,400 |
+| a POST whose body is read and returned | 16,400 |
+| a handler that computes `(fib 20)` (22,000 function calls) | 2,560 |
+| `app-server-read` (a file is read) | 14,300 |
+| an SQLite `SELECT` | 13,700 |
+| an SQLite `INSERT` (written to disk) | 2,590 |
+| a static file | 2,750 |
+
+With one connection at a time it is 6,700 per second (ApacheBench opens a new connection for each request), with 100 at a time 17,000. A handler that takes long holds up everyone behind it, as in any single-threaded event loop; there is no way yet to answer later (to wait for something without blocking). More than about a hundred connections arriving in the same instant exceed the queue the operating system keeps for the server.
+
 ## Getting the project out
 
 - **download .zip** in the header: the project as one archive that runs by itself wherever there are bash and GNU Emacs (29 or later):
