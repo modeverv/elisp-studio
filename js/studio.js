@@ -34,7 +34,9 @@ const TEMPLATE = /^[a-z0-9-]+$/.test(example || "") ? `examples/${example}/` : "
 const TEMPLATE_FILES = ["index.html", "app.el", "style.css"];
 const TEMPLATE_OPTIONAL_FILES = ["server.el"];
 const SERVER_FILE = "server.el";
-const SERVER_DATA_KEY = "server-data";
+// The server's data in IndexedDB.  A studio of this machine opens one
+// directory after another on the same address, so there each has its own.
+const serverDataKey = () => (LOCAL ? `server-data:${PROJECT}` : "server-data");
 const TAB_UPLOAD_LIMIT = 32 * 1024 * 1024;
 const UPLOAD_TIMEOUT_MS = 60000;
 const DEFERRED_TIMEOUT_MS = 30000;   // as app-server-deferred-timeout
@@ -207,8 +209,8 @@ function studioStore(mode, action) {
     };
   });
 }
-const loadServerData = () => studioStore("readonly", (store) => store.get(SERVER_DATA_KEY)).then((data) => data || [], () => []);
-const saveServerData = (data) => studioStore("readwrite", (store) => store.put(data, SERVER_DATA_KEY)).catch(() => {});
+const loadServerData = () => studioStore("readonly", (store) => store.get(serverDataKey())).then((data) => data || [], () => []);
+const saveServerData = (data) => studioStore("readwrite", (store) => store.put(data, serverDataKey())).catch(() => {});
 
 async function startServer(source, project) {
   stopServer();
@@ -547,6 +549,11 @@ async function startPreview(project, why) {
       wasmacs: WASMACS.href,
       sources: built.sources.map(({ name, text }) => ({ name, text })),
       fetch: applicationFetch,
+      // The application's localStorage values (react-storage-set): the
+      // frame is "srcdoc" for every project, and a studio of this machine
+      // shows one directory after another on the same address.  A page
+      // that names its own (<meta name="elisp-react:storage">) keeps it.
+      ...(LOCAL && !frame.contentDocument.querySelector('meta[name="elisp-react:storage"]') ? { storage: PROJECT } : {}),
       // "restart app" is a start from the files as they are: no compiled
       // code kept from an earlier start (it may have been compiled against
       // another version of a file's macros).
