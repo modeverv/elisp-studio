@@ -368,6 +368,7 @@ node tools/studio.mjs ~/my-app     # ディレクトリにあるプロジェク�
 |---|---|
 | `C-x C-s` | いつも通り保存します。そのあと、スタジオの応答がエコーエリアに出ます（「app.el updated: no reload, state kept」）。コンパイラの警告やエラーがあるときは `*elisp-studio*` バッファに出て、`next-error` で自分のファイルのその場所に移動できます。 |
 | `C-M-x` | ポイント位置の定義を、ファイルを保存せずに、動いているアプリケーションの中で評価します。 |
+| `C-c C-e` | 式を動いているアプリケーションの中で評価し、値を表示します。`(react-inspect)` は部品を props と state つきで並べます。 |
 
 ディレクトリは普通のプロジェクトです。`index.html`、`app.el`、`style.css`、必要なら `server.el` があり、git も自由に使えます。`server.el` は、Web 上のスタジオと同じく、ウィンドウの中で動きます（タブの中の3つ目の Emacs で、データはブラウザのストレージに入ります）。ネイティブの Emacs で動かしたいときは、ウィンドウから ZIP をダウンロードしてその `run.sh` を使うか、`tools/project/` を自分でコピーしてください。ページの中の Emacs が保存以外に提供している機能（プロジェクト自身の定義による補完と Flymake、`C-c C-p`）は、`elisp-studio-local.el` にはありません。自分の Emacs の機能を使ってください。
 
