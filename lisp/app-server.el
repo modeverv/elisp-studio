@@ -301,6 +301,26 @@ Files under /assets/ that never change, kept by browsers for a year:
 
 In the studio the files come from the editor, without these headers.")
 
+(defvar app-server-page-function nil
+  "A function that fills the page in for a path, or nil.
+A native Emacs calls it with the PATH of a request (\"/\", \"/watch/42\")
+when it sends the project's index.html, and when a GET names no file.
+It returns nil (the page as it is; for a path that is no file, 404) or a
+plist, and the server sends index.html with that put in:
+
+  :title TEXT              the page's <title>
+  :meta ((NAME . TEXT)...) <meta> elements, which replace those of the
+                           same name (og:... are written as property=)
+  :html HTML               the content of the element with id \"app\",
+                           as HTML: `react-render-to-string' makes it
+  :status N                200 unless said
+
+TEXT is escaped; HTML is not.  So a link to a route has its own title
+and description for link previews and crawlers, and the page shows
+content before its Emacs has started (it mounts over it).  react.el is
+on the server's `load-path' when ./fetch-emacs.sh has put it in vendor/.
+In the studio the page is index.html as it is.")
+
 (defun app-server-set-cookie (name value &rest attributes)
   "Give the visitor's browser the cookie NAME with VALUE (a string).
 ATTRIBUTES is a plist:
