@@ -315,6 +315,37 @@ PUBLIC_ORIGIN=https://example.com WORKERS=4 PROXY_SENDS_FILES=yes ./run.sh
 
 ないもの：ストリーミング応答と WebSocket、トークンのための関数（上の「トークン」）、フォームによるアップロード（`multipart/form-data`。ページはファイルそのものを送ります）、Emacs が自分でファイルを送る構成での、ハンドラが送るファイルの一部分だけの送信（その構成では、アップロードされた動画の途中からの再生はできません。`PROXY_SENDS_FILES=yes` ではプロキシが送るので、一部分の送信もできます）。このサーバーを本気で攻撃した人はまだいません。プロキシの後ろに置く数百行の Emacs Lisp であり、身内向けのアプリケーションのためのものです。
 
+### Docker で動かす
+
+ダウンロードには `Dockerfile` と `docker-compose.yml` も入っています。コンテナの中身は次のとおりです。
+
+- Ubuntu 24.04 と、その GNU Emacs 29.3
+- `run.sh` の手前に置く Caddy（同梱の `Caddyfile` を使う）
+
+サーバーは 127.0.0.1 でしか待ち受けないので、Caddy も同じコンテナに入れています。
+
+```sh
+docker compose up -d --build                                                  # http://localhost:8080/
+DOMAIN=example.com HTTP_PORT=80 HTTPS_PORT=443 docker compose up -d --build   # https://example.com/（証明書は Caddy が取得）
+```
+
+中では Emacs のプロセスが4つ、`.data/` 以外には書き込めないユーザーで動きます。`.data/` と Caddy の証明書はボリュームなので、コンテナを作り直しても残ります。
+
+- `PUBLIC_ORIGIN` は `https://DOMAIN` です。ドメインがなければ `http://localhost:HTTP_PORT` です。閲覧者が別のアドレスから来るときは指定してください。
+- `CORS_ORIGINS` はそのまま渡ります。
+- `Caddyfile` のアドレスは `SITE_ADDRESS`（既定は `example.com`）で、コンテナが設定します。
+- `server/deploy/docker-start.sh` は Caddy と `run.sh` を起動し、どちらかが終わるとコンテナを終えます。
+
+`npm run test:docker` は、テンプレートをこの形でビルドして次のことを確かめます（CI でも実行します）。
+
+- ページと `/api/`
+- Caddy が Emacs の代わりに送るファイル
+- リクエストを断る場面
+- 再起動したあとと、コンテナを作り直したあとのデータ
+- `DOMAIN=localhost` での HTTPS
+
+`server.el` を持つもっと大きなアプリケーションの Parens も、同じ方法で手で動かして確かめました。
+
 ### このサーバーの速さ
 
 1つの Emacs、1つのスレッドで、Node.js と同じ動き方をします。接続は OS の中で待ち、Emacs はリクエストを1つ受け取り、ハンドラを最後まで実行し、応答して、次を受け取ります。`server.el` とサーバー自身は、起動時にバイトコンパイルされます。Apple M4 Max、Emacs 31.1 で、ApacheBench を使って同時10接続で計測した結果です（`ab -n 10000 -c 10`。`-k` を付けると、プロキシと同じように接続を維持します）。
@@ -368,6 +399,7 @@ Caddy の後ろに複数のワーカーを置いた場合（`ab -k -c 40`）、�
   .gitignore          ツールがここに書き込み、git に入れるべきでないもの（.data/、vendor/wasmacs/ など）
   test/run.sh         検査。すべての .el ファイルが警告なしでコンパイルできること、次に test/*-test.el（ERT）
   .github/workflows/test.yml    同じ検査を GitHub への push のたびに行う
+  Dockerfile, docker-compose.yml, .dockerignore    docker compose up。同じものをコンテナで、Caddy を手前に置いて動かす（「Docker で動かす」）
   ```
 
   `./run.sh` を実行すると、Emacs がページを配信し、ページからのリクエストに答えます。ブラウザの中でページの `app.el` を動かす Emacs は、通常はページが wasmacs のサイトからダウンロードします。`./fetch-emacs.sh` を実行したあとは、同じ Emacs が `vendor/` から配信するようになり、インターネットは不要になります。

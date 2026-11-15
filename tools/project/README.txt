@@ -8,6 +8,7 @@ An application written in Emacs Lisp, made with elisp-studio
   backup.sh                       copy what the server keeps (.data/), while it runs
   server/                         what run.sh loads into Emacs
   server/deploy/                  for publishing: Caddy, nginx, systemd
+  Dockerfile, docker-compose.yml  for publishing with Docker (Caddy in front)
   .gitignore                      what git should not keep: .data/ (the users'
                                   sessions and password hashes), vendor/wasmacs/, ...
   test/run.sh                     check it: every .el file compiles without a
@@ -66,6 +67,16 @@ large file at a time, a proxy many, so Emacs only says which file may go
 PROXY_SENDS_FILES with those configurations only.  What server.el keeps
 in a Lisp variable is known to one of the four processes; WORKERS=1 for
 an application that needs that.
+
+With Docker (Dockerfile, docker-compose.yml): Ubuntu's GNU Emacs, and
+Caddy in front of run.sh in the same container:
+
+  docker compose up -d --build        then open http://localhost:8080/
+  DOMAIN=example.com HTTP_PORT=80 HTTPS_PORT=443 docker compose up -d --build
+                                      https://example.com/; Caddy gets the
+                                      certificate
+
+.data/ and Caddy's certificates are volumes: they outlive the container.
 
 Pages of other sites may not use /api/, unless they are named:
 

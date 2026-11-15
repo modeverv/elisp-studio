@@ -27,6 +27,21 @@ jobs:
       - name: The scripts parse
         run: node --check js/studio.js && node --check js/tar.js && node --check tools/serve.mjs
 
+  # The downloaded project in a container (Dockerfile, docker-compose.yml):
+  # the template, built and started with docker compose, checked from
+  # outside, over HTTP and over HTTPS (test/docker.mjs).
+  docker:
+    name: Docker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: npm run test:docker
+
   # The site is the repository itself: static files, no build step.
   pages:
     name: Publish Pages
