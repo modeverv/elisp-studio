@@ -211,10 +211,36 @@ were taken."
                  (when (stringp (nth 1 rest)) (put name 'variable-documentation (nth 1 rest)))
                  (elisp-studio--record file name)
                  (setq count (1+ count)))
+                ;; A component: known by its name (completion) and found by
+                ;; M-. at its react-define-component.
+                (`(react-define-component (quote ,(and name (pred symbolp))) . ,_)
+                 (unless (fboundp name)
+                   (defalias name (lambda (&rest _) nil) "A component of the project (react-define-component)."))
+                 (put name 'elisp-studio-component t)
+                 (elisp-studio--record file (cons 'defun name))
+                 (setq count (1+ count)))
                 (`(,(or 'cl-defstruct 'define-error 'require) . ,_)
                  (eval form t)))
             (error nil)))))
     count))
+
+(defun elisp-studio--find-component (found symbol _type _library)
+  "When M-. found no definition of SYMBOL, a component: its react-define-component."
+  (if (or (cdr-safe found) (not (get symbol 'elisp-studio-component)))
+      found
+    (let ((buffer (car-safe found)))
+      (when buffer
+        (with-current-buffer buffer
+          (save-excursion
+            (goto-char (point-min))
+            (if (re-search-forward (format "(react-define-component[ \t\n]+'%s\\_>" (regexp-quote (symbol-name symbol))) nil t)
+                (cons buffer (match-beginning 0))
+              found)))))))
+
+(advice-add 'find-function-search-for-symbol :around
+            (lambda (search symbol type library)
+              (elisp-studio--find-component (funcall search symbol type library) symbol type library))
+            '((name . elisp-studio-components)))
 
 (defun elisp-studio-learn-project ()
   "Take the definitions of every Emacs Lisp file of the project."
@@ -324,7 +350,9 @@ Without a remote the commit is made and the push is left out."
              (derived-mode-p 'emacs-lisp-mode))
     (elisp-studio-mode 1)))
 
-(elisp-studio-learn-project)
+;; After this file is loaded: definitions made while it loads would be
+;; recorded as this file's, and M-. would come here.
+(run-at-time 0 nil #'elisp-studio-learn-project)
 (add-hook 'find-file-hook #'elisp-studio--maybe-enable)
 (dolist (buffer (buffer-list))
   (with-current-buffer buffer (elisp-studio--maybe-enable)))

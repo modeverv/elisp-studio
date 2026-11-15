@@ -26,7 +26,7 @@ const emacs = execFileSync(join(root, "tools/find-emacs.sh"), { encoding: "utf8"
 // A native Emacs, as somebody's own: the library loaded, then FORMS.
 const inEmacs = (forms) => new Promise((resolve, reject) => {
   const child = spawn(emacs, ["--batch", "-Q", "-l", join(root, "lisp/elisp-studio-local.el"), "--eval", `(progn ${forms})`],
-    { stdio: ["ignore", "pipe", "pipe"] });
+    { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, XDG_CACHE_HOME: join(workDir, "cache") } });
   let out = "", err = "";
   child.stdout.on("data", (chunk) => { out += chunk; });
   child.stderr.on("data", (chunk) => { err += chunk; });
@@ -229,6 +229,24 @@ try {
   const inspected = await inEmacs(`(find-file ${JSON.stringify(join(project, "app.el"))}) (princ (elisp-studio-local-eval-expression "(react-inspect)"))`);
   assert.match(inspected, /:component Greeting :depth 0/);
   pass(`an expression is evaluated in the application and its value comes back, to Emacs too: ${inspected.trim()}`);
+
+  // Your own Emacs knows react.el and the project's definitions: Flymake
+  // compiles a file that requires react without warnings, components and
+  // helpers complete.
+  await writeFile(join(project, "check.el"), ";;; -*- lexical-binding: t; -*-\n(require 'react)\n(react-define-component 'Check :render (lambda (self) (jsx (p (:class \"c\") (react-state self :x) (order-word-3)))))\n");
+  const known = await inEmacs(`
+    (find-file ${JSON.stringify(join(project, "check.el"))})
+    (require 'bytecomp)
+    (let ((load-path (append elisp-flymake-byte-compile-load-path load-path)) (warnings nil))
+      (let ((byte-compile-log-warning-function (lambda (text &rest _) (push text warnings))))
+        (byte-compile-file buffer-file-name))
+      (princ (format "react:%s component:%s helper:%s warnings:%S"
+                     (featurep 'react) (fboundp 'Greeting) (fboundp 'order-word-3)
+                     (seq-filter (lambda (text) (string-match-p "not known\\|free variable" text)) warnings))))`);
+  assert.match(known, /react:t component:t helper:t warnings:nil/);
+  await rm(join(project, "check.el"));
+  await rm(join(project, "check.elc"), { force: true });
+  pass("your own Emacs gets react.el from the studio and the project's definitions: no false warnings, components and helpers known");
 
   // No isolation on this machine: there is no editor in the page.
   assert.deepEqual(await js("[window.crossOriginIsolated, document.querySelector('#preview').contentWindow.crossOriginIsolated]"), [false, false]);
