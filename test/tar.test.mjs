@@ -8,7 +8,7 @@ const encoder = new TextEncoder();
 function entry(path, content, { type = "0", prefix = "" } = {}) {
   const header = new Uint8Array(512);
   const put = (offset, text) => header.set(encoder.encode(text), offset);
-  const body = encoder.encode(content);
+  const body = typeof content === "string" ? encoder.encode(content) : content;
   put(0, path);
   put(100, "0000644");
   put(124, body.length.toString(8).padStart(11, "0"));
@@ -62,4 +62,11 @@ test("projectFiles takes one directory and leaves the editor's leftovers out", (
 test("an empty or foreign archive has no project", () => {
   assert.equal(projectFiles(new Uint8Array(1024), "/home/user/elisp-studio/app").size, 0);
   assert.equal(projectFiles(tar(entry("home/user/x", "y")), "/home/user/elisp-studio/app").size, 0);
+});
+
+test("projectFiles keeps a file that is not UTF-8 as its bytes", () => {
+  const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00]);
+  const files = projectFiles(tar(entry("home/user/app/app.el", "(list)"), entry("home/user/app/pixel.png", png)), "/home/user/app");
+  assert.equal(files.get("app.el"), "(list)");
+  assert.deepEqual([...files.get("pixel.png")], [...png]);
 });

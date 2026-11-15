@@ -321,8 +321,18 @@ function requestHeaders(given) {
 // The fetch of the application: /api/... goes to the server's Emacs.
 async function applicationFetch(url, options = {}) {
   const target = new URL(url, "http://application.invalid/");
-  if (target.origin !== "http://application.invalid" || !target.pathname.startsWith("/api/")) {
-    return fetch(url, options);
+  if (target.origin !== "http://application.invalid") return fetch(url, options);
+  if (!target.pathname.startsWith("/api/")) {
+    // A file of the project (data.json): from the project, not from the
+    // studio's own site, which relative URLs would reach from here.
+    const path = decodeURIComponent(target.pathname.slice(1));
+    if (files.has(path)) {
+      const content = files.get(path);
+      const type = /\.json$/.test(path) ? "application/json" : typeof content === "string" ? "text/plain; charset=utf-8" : "application/octet-stream";
+      return new Response(content, { headers: { "Content-Type": type } });
+    }
+    if (LOCAL) return fetch(new URL(target.pathname.slice(1) + target.search, `${location.origin}/__project/files/`), options);
+    return new Response(`"${path} is not a file of the project"`, { status: 404 });
   }
   // The answer as a Response.  Set-Cookie is not a header a page may see:
   // the cookies go to the jar that stands in for the browser's.
@@ -394,6 +404,13 @@ function buildDocument(project) {
   const html = project.get("index.html");
   if (!html) throw new Error(`${PROJECT}/index.html is missing`);
   const doc = new DOMParser().parseFromString(html, "text/html");
+  // On this machine the server has the project's files: relative URLs
+  // (an <img src>, a data file) resolve there, not to the studio's page.
+  if (LOCAL) {
+    const base = doc.createElement("base");
+    base.href = `${location.origin}/__project/files/`;
+    doc.head.prepend(base);
+  }
   const styles = [];
   for (const link of doc.querySelectorAll('link[rel="stylesheet"][href]')) {
     const path = link.getAttribute("href");
@@ -528,7 +545,9 @@ addressField.addEventListener("keydown", (event) => {
 
 // The editor has NEXT; the application has `files`.  Bring it up to date.
 async function applyProject(next) {
-  const changed = [...next.keys()].filter((path) => next.get(path) !== files.get(path) || savedAgain.has(path));
+  const same = (a, b) => a === b || (a instanceof Uint8Array && b instanceof Uint8Array
+    && a.length === b.length && a.every((byte, i) => byte === b[i]));
+  const changed = [...next.keys()].filter((path) => !same(next.get(path), files.get(path)) || savedAgain.has(path));
   for (const path of changed) {
     unsaved.delete(path);
     savedAgain.delete(path);

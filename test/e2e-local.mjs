@@ -152,6 +152,25 @@ try {
   await appUntil("document.querySelector('.where').textContent === '#/about'", "Forward");
   pass("the address bar shows the application's address and moves it; hash links stay in the preview; Back and Forward work");
 
+  // The project's own files: a data file the application fetches, an image
+  // it shows; nothing of the server.
+  const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  await writeFile(join(project, "pixel.png"), pixel);
+  await writeFile(join(project, "data.json"), '{"greeting":"from data.json"}');
+  await writeFile(join(project, "app.el"), `;;; -*- lexical-binding: t; -*-
+(react-define-component 'Files
+  :initial-state (lambda (_props) (list :greeting ""))
+  :did-mount (lambda (self) (react-fetch "data.json" :then (lambda (response) (react-set-state self :greeting (plist-get (react-response-json response) :greeting)))))
+  :render (lambda (self) (jsx (div (p (:class "greeting") (react-state self :greeting)) (img (:class "pixel" :src "pixel.png" :alt ""))))))
+(react-mount '(Files) "#app")
+`);
+  await appUntil("document.querySelector('.greeting')?.textContent === 'from data.json'", "the application fetches a file of the project");
+  await appUntil("document.querySelector('.pixel')?.naturalWidth === 1", "the application shows an image of the project");
+  for (const [path, status] of [["pixel.png", 200], ["server.el", 404], [".elisp-studio.json", 404], ["../package.json", 404]]) {
+    assert.equal((await fetch(`${origin}/__project/files/${path}`)).status, status, path);
+  }
+  pass("the application fetches and shows the project's own files (data.json, an image); server.el and hidden files are not served");
+
   // Not a file of a project: the mode stays off, and saving asks nobody.
   const elsewhere = join(workDir, "elsewhere.el");
   await writeFile(elsewhere, "(list)");

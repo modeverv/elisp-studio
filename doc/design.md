@@ -40,6 +40,8 @@ The project's `index.html` is a complete page for a static host: it links `style
 
 The frame is an `srcdoc` iframe: same origin as the studio (it can reach `contentDocument` and `contentWindow`), and it inherits the studio's cross-origin isolation. Its address is `about:srcdoc` and its base URL the studio's, so `pushState` throws there and a hash link would load the studio into the frame. elisp-react therefore keeps the application's address in memory in such a frame and follows hash links itself; the studio's address bar follows it (`elisp-react:location`) and moves it (`app.location.navigate`, `go`).
 
+Relative URLs resolve against the studio's page there, which used to hand the application the studio's own files (`package.json`, `index.html`). The application's `fetch` (the studio's `applicationFetch`) answers a relative URL from the project's files instead; on one's own machine the built document also gets a `<base>` at `/__project/files/`, which the server answers from the directory (with the project server's filters), so the browser's own requests (`<img>`, fonts) find the files. The page's studio has no such server; its file image keeps files that are not UTF-8 as bytes.
+
 ## Starting the editor
 
 The editor's URL carries two `extra-eval` forms, which wasmacs passes to Emacs as `--eval`: one creates the project from `template/` if `app.el` does not exist, the other visits `app.el`. The files then live in Emacs's persistent user image like everything else in `/home/user`.
