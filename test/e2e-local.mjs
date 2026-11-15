@@ -282,7 +282,27 @@ try {
     await new Promise((resolve) => native.server.close(resolve));
   }
 
-  // No isolation on this machine: there is no editor in the page.
+  // What a project keeps in the browser (react-storage-set, the server's
+  // data) is its own: B, opened afterwards on the same address, sees none
+  // of A's, and A has it again later.
+  const noteServer = `;;; -*- lexical-binding: t; -*-
+(defun app-server-handle (method path body)
+  (pcase (list method path)
+    ('("POST" "/api/note") (app-server-write "note" (app-server-data body)))
+    ('("GET" "/api/note") (app-server-read "note" "none"))
+    (_ (signal 'file-missing (list "No such API" path)))))
+`;
+  await writeFile(join(project, "server.el"), noteServer);
+  await client.send("Page.navigate", { url: `${origin}/elisp-studio/?project=local` }, sessionId);
+  const note = `window.elispStudio.fetch('/api/note').then((response) => response.text())`;
+  await until(`${note}.then((text) => text === '"none"')`, "A's server answers");
+  await js(`window.elispStudio.fetch('/api/note', { method: 'POST', body: '"note of A"' }).then((response) => response.text())`);
+  await until(`${note}.then((text) => text === '"note of A"')`, "A's server keeps the note");
+  assert.equal((await js(`window.elispStudio.evaluate('(react-storage-set "api-key" "KEY-OF-A")')`)).error ?? null, null);
+  const storedKey = `window.elispStudio.evaluate('(react-storage-get "api-key")').then((answer) => answer.value)`;
+  assert.equal(await js(storedKey), '"KEY-OF-A"');
+  await pause(500);   // the server's data reaches IndexedDB
+
   assert.deepEqual(await js("[window.crossOriginIsolated, document.querySelector('#preview').contentWindow.crossOriginIsolated]"), [false, false]);
   assert.equal((await fetch(`${origin}/elisp-studio/`)).headers.get("cross-origin-embedder-policy"), null);
   pass("on this machine the studio and its preview are not cross-origin isolated (third-party frames need no credentialless)");
@@ -301,6 +321,24 @@ try {
   assert.equal(alone, "saved");
   assert.match(await readFile(join(project, "style.css"), "utf8"), /saved without a studio/);
   pass("outside a project the mode is off; without the studio a save is a save");
+
+  // B on A's address, then A again.
+  const port = Number(new URL(origin).port);
+  const projectB = join(workDir, "other-app");
+  await cp(join(root, "template"), projectB, { recursive: true });
+  await writeFile(join(projectB, "server.el"), noteServer);
+  for (const [directory, expected, key] of [[projectB, '"none"', "nil"], [project, '"note of A"', '"KEY-OF-A"']]) {
+    const again = await serve({ project: directory, port });
+    try {
+      await client.send("Page.navigate", { url: `${again.origin}/elisp-studio/?project=local` }, sessionId);
+      await until(`document.querySelector('#project').textContent === ${JSON.stringify(directory)} && Boolean(window.elispStudio.preview?.app)`, `the studio shows ${directory}`);
+      await until(`${note}.then((text) => text === ${JSON.stringify(expected)})`, `the server data of ${directory}`);
+      assert.equal(await js(storedKey), key);
+    } finally {
+      await new Promise((resolve) => again.server.close(resolve));
+    }
+  }
+  pass("projects opened one after the other on the same address keep their own localStorage values and server data");
   console.log("local e2e passed");
 } finally {
   client?.close();
