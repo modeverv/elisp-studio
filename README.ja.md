@@ -345,6 +345,9 @@ Caddy の後ろに複数のワーカーを置いた場合（`ab -k -c 40`）、�
   backup.sh           サーバーが保持するもの（.data/）を、動かしたままコピーする
   server/             run.sh が Emacs に読み込ませるもの（HTTP サーバーと app-server.el、そのライセンス表示）
   README.txt
+  .gitignore          ツールがここに書き込み、git に入れるべきでないもの（.data/、vendor/wasmacs/ など）
+  test/run.sh         検査。すべての .el ファイルが警告なしでコンパイルできること、次に test/*-test.el（ERT）
+  .github/workflows/test.yml    同じ検査を GitHub への push のたびに行う
   ```
 
   `./run.sh` を実行すると、Emacs がページを配信し、ページからのリクエストに答えます。ブラウザの中でページの `app.el` を動かす Emacs は、通常はページが wasmacs のサイトからダウンロードします。`./fetch-emacs.sh` を実行したあとは、同じ Emacs が `vendor/` から配信するようになり、インターネットは不要になります。
@@ -355,6 +358,7 @@ Caddy の後ろに複数のワーカーを置いた場合（`ab -k -c 40`）、�
   - **圧縮済みのコピーを送る。** `fetch-emacs.sh` は、Emacs 本体の隣に gzip のコピーを置きます（`temacs.wasm.gz`、`bootstrap-emacs.pdmp.gz` など）。サーバーは、gzip を受け取れるブラウザにはコピーのほうを送ります。コピーがなければ、訪問者のダウンロードは 17MB になります。同梱の Caddy と nginx の設定を通しても 14MB です（最も大きいファイルを圧縮しないため）。
 
   `vendor/` には、スタジオと同じく Emacs 付属の Lisp がすべて入ります。そのため、スタジオで動いたものはサイトでも動きます。`app.el` が一部の処理でだけ `require` するライブラリ（`(require 'calc)` など）は、そのときに取得されます。`./fetch-emacs.sh --core` を使うと、コピーする量が減ります（約45MB）。入るのは言語とそのライブラリ（`cl-lib`、`seq`、`map`、`json`、`rx`、`generator`、`iso8601`、`url-util`、文字コード表。コンパイル済みのみ）で、エディタ用のライブラリとソースは入りません。Org、Calc、各言語のモードを `require` するページは、スタジオで動いていても、サイトでは「Cannot open load file」で失敗します。このオプションは、ディスクに余裕がないマシンで、ページを試したうえで使うものです。
+- **検査する。** `test/run.sh`（ダウンロードと、ローカルの studio で作った新しいプロジェクトに入っています）は、ネイティブの Emacs でプロジェクトを検査します。まず、プロジェクトのすべての `.el` ファイルが警告なしでコンパイルできることを確かめます。これが lint です（知られていない関数や変数、引数の数の誤りを見つけます）。次に `test/*-test.el` の ERT テストを実行します。テンプレートの `test/app-test.el` は、elisp-react の `react-testing` でアプリケーションをブラウザなしで描画し（カウンターをクリックし、ページから `server.el` へのリクエストに答えます）、専用のデータディレクトリで `server.el` のハンドラーを呼びます。`react.el`、`react-testing.el`、`app-server.el` は、プロジェクトの `vendor/` と `server/` にあればそれを使い、なければ Web から `.cache/` に取得します。`.github/workflows/test.yml` は、push のたびにこれを実行します。プロジェクトが自分で持つサードパーティの Lisp（`lib/` や `vendor/名前/`）は `load-path` に入り、検査はされません。
 - Emacs の **`C-c C-p`**（`M-x elisp-studio-publish`）：Emacs の中で動く git で `git add`、`git commit` を行い、`origin` というリモートがあれば `git push` します。GitHub へ HTTPS で push するには、[wasmacs の companion 拡張](https://github.com/modeverv/wasmacs#network-access)と、リモートの認証情報が必要です（最初に1回、`M-x shell` で `cd ~/elisp-studio/app`、`git remote add origin https://github.com/YOU/REPOSITORY.git`）。`server.el` のないプロジェクトを GitHub Pages を有効にしたリポジトリに push すれば、そのまま Web に公開されます。
 
 ## 自分のマシンで使う
@@ -382,7 +386,7 @@ node tools/studio.mjs ~/my-app --native-server   # その server.el をサーバ
 | `C-M-x` | ポイント位置の定義を、ファイルを保存せずに、動いているアプリケーションの中で評価します。 |
 | `C-c C-e` | 式を動いているアプリケーションの中で評価し、値を表示します。`(react-inspect)` は部品を props と state つきで並べます。 |
 
-ディレクトリは普通のプロジェクトです。`index.html`、`app.el`、`style.css`、必要なら `server.el` があり、git も自由に使えます。`server.el` は、Web 上のスタジオと同じく、ウィンドウの中で動きます（タブの中の3つ目の Emacs で、データはブラウザのストレージに入ります）。`--native-server` を付けると、代わりにネイティブの Emacs（`run.sh` と同じサーバー、`tools/serve-project.sh`）で動き、アプリケーションの `/api/` はそこへ送られます。データはディレクトリの `.data/` に入り、プログラムを実行でき、どのサイトにも届きます。`server.el` や、それが読み込んだプロジェクトのファイルを保存すると、サーバーを起動し直します（ウィンドウにそう表示されます）。アプリケーションがブラウザに保存するもの（`react-storage-set` の値と、ウィンドウの中のサーバーのデータ）は、ディレクトリごとに分かれます。同じポートで別のプロジェクトを順に開いても、互いのデータは見えません。studio なしでプロジェクトを動かすには、ウィンドウから ZIP をダウンロードしてその `run.sh` を使うか、`tools/project/` を自分でコピーしてください。`elisp-studio-local.el` は、プロジェクトが何で書かれているかも自分の Emacs に教えます。プロジェクトのファイルを開くと、studio から `react.el` と `app-server.el` を取得し（`~/.cache/elisp-studio/lisp/` へ）、`load-path` と Flymake のそれに加え、プロジェクトのファイルを実行せずに読んで定義（関数、変数、部品）を覚えます。保存のたびに覚え直します。これで補完、ElDoc、`M-.` がそれらを知り、`(require 'react)` と書いたファイル（テンプレートの `app.el` は書いています）は Flymake の偽の警告を受けません。`C-c C-p` はページのものです。自分の Emacs には自分の git があります。
+ディレクトリは普通のプロジェクトです。`index.html`、`app.el`、`style.css`、必要なら `server.el` があり、git も自由に使えます。新しいディレクトリには、テンプレートのファイルと一緒に `.gitignore`、`test/run.sh` とその CI ワークフローが入ります（上の「検査する」）。git リポジトリでは、studio がそこに書くファイル（`.elisp-studio.json`、`--native-server` のときは `.data/` も）を、その clone だけのものである `.git/info/exclude` に加えます。サードパーティの Lisp は、ほかのファイルと同じくプロジェクトに置き（`lib/` や `vendor/名前/`）、`index.html` に並べます。studio がプロジェクトとして扱わないのは、`fetch-emacs.sh` が入れる `vendor/wasmacs/` と `vendor/elisp-react/`、それに `server/` だけです。`server.el` は、Web 上のスタジオと同じく、ウィンドウの中で動きます（タブの中の3つ目の Emacs で、データはブラウザのストレージに入ります）。`--native-server` を付けると、代わりにネイティブの Emacs（`run.sh` と同じサーバー、`tools/serve-project.sh`）で動き、アプリケーションの `/api/` はそこへ送られます。データはディレクトリの `.data/` に入り、プログラムを実行でき、どのサイトにも届きます。`server.el` や、それが読み込んだプロジェクトのファイルを保存すると、サーバーを起動し直します（ウィンドウにそう表示されます）。アプリケーションがブラウザに保存するもの（`react-storage-set` の値と、ウィンドウの中のサーバーのデータ）は、ディレクトリごとに分かれます。同じポートで別のプロジェクトを順に開いても、互いのデータは見えません。studio なしでプロジェクトを動かすには、ウィンドウから ZIP をダウンロードしてその `run.sh` を使うか、`tools/project/` を自分でコピーしてください。`elisp-studio-local.el` は、プロジェクトが何で書かれているかも自分の Emacs に教えます。プロジェクトのファイルを開くと、studio から `react.el` と `app-server.el` を取得し（`~/.cache/elisp-studio/lisp/` へ）、`load-path` と Flymake のそれに加え、プロジェクトのファイルを実行せずに読んで定義（関数、変数、部品）を覚えます。保存のたびに覚え直します。これで補完、ElDoc、`M-.` がそれらを知り、`(require 'react)` と書いたファイル（テンプレートの `app.el` は書いています）は Flymake の偽の警告を受けません。`C-c C-p` はページのものです。自分の Emacs には自分の git があります。
 
 サーバーは 127.0.0.1 で待ち受けます。ディレクトリの内容を伝える機能と、エディタからアプリケーションを操作する機能は、このマシン自身のプログラムのためのものです。他のサイトのページからのリクエストと、サーバー自身の名前以外でのリクエストは拒否します。
 

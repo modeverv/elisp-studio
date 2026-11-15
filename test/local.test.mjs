@@ -2,7 +2,7 @@
 // side of it), sibling sites without a checkout, and the window's start.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, request as createRequest } from "node:http";
 import { tmpdir } from "node:os";
@@ -11,7 +11,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { readProject } from "../tools/local-project.mjs";
 import { serve } from "../tools/serve.mjs";
-import { chromeArguments, findChrome } from "../tools/studio.mjs";
+import { chromeArguments, excludeFromGit, findChrome, newProject } from "../tools/studio.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -51,13 +51,16 @@ test("a project in a directory: its text files, without what editors and tools l
                                 [".elisp-studio.json", "{}"], ["photo.png", "not text"], ["run.sh", "#!/bin/sh"]]) {
       await writeFile(join(directory, name), text);
     }
-    for (const name of ["vendor/wasmacs", "server", ".data", ".git", "node_modules/x"]) {
+    // A library of the project's own, in vendor/ beside what the tools put there.
+    await mkdir(join(directory, "vendor/dash"), { recursive: true });
+    await writeFile(join(directory, "vendor/dash/dash.el"), "(provide 'dash)");
+    for (const name of ["vendor/wasmacs", "vendor/elisp-react", "server", ".data", ".git", "node_modules/x"]) {
       await mkdir(join(directory, name), { recursive: true });
       await writeFile(join(directory, name, "inside.el"), "(not the project)");
     }
     await writeFile(join(directory, "huge.json"), "x".repeat(1024 * 1024 + 1));
     const { files } = readProject(directory);
-    assert.deepEqual(Object.keys(files).sort(), ["app.el", "index.html", "parts/list.el", "server.el", "style.css"]);
+    assert.deepEqual(Object.keys(files).sort(), ["app.el", "index.html", "parts/list.el", "server.el", "style.css", "test/app-test.el", "vendor/dash/dash.el"]);
     assert.equal(files["app.el"], await readFile(join(directory, "app.el"), "utf8"));
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -73,7 +76,7 @@ test("the server tells the page about the directory and passes on what an editor
     const first = await page.next();
     assert.equal(first.event, "files");
     assert.equal(first.data.directory, directory);
-    assert.deepEqual(Object.keys(first.data.files).sort(), ["app.el", "index.html", "server.el", "style.css"]);
+    assert.deepEqual(Object.keys(first.data.files).sort(), ["app.el", "index.html", "server.el", "style.css", "test/app-test.el"]);
 
     // A save, by whatever saves: the page gets the files as they are now.
     await writeFile(join(directory, "style.css"), "body { color: red }");
@@ -84,7 +87,7 @@ test("the server tells the page about the directory and passes on what an editor
     await writeFile(join(directory, "style.css~"), "backup");
     await writeFile(join(directory, ".#style.css"), "lock");
     await writeFile(join(directory, "new.el"), "(new)");
-    assert.deepEqual(Object.keys((await page.next()).data.files).sort(), ["app.el", "index.html", "new.el", "server.el", "style.css"]);
+    assert.deepEqual(Object.keys((await page.next()).data.files).sort(), ["app.el", "index.html", "new.el", "server.el", "style.css", "test/app-test.el"]);
 
     // The page says what happened; an editor that asked before gets it.
     const state = await (await fetch(`${origin}/__project/state`)).json();
@@ -192,6 +195,43 @@ test("--native-server: server.el runs in a native Emacs behind the studio, and s
     if (!gone) await pause(100);
   }
   assert.equal(gone, true);
+});
+
+test("a new project gets the template and what keeps and checks it; a repository keeps the studio's files out of git", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "elisp-studio-new-"));
+  try {
+    const app = join(directory, "app");
+    newProject(app);
+    for (const name of ["index.html", "app.el", "style.css", "server.el", "test/app-test.el", ".gitignore", "test/run.sh", ".github/workflows/test.yml"]) {
+      assert.equal(existsSync(join(app, name)), true, name);
+    }
+    assert.notEqual(statSync(join(app, "test/run.sh")).mode & 0o111, 0);
+    assert.match(await readFile(join(app, ".gitignore"), "utf8"), /^\.data\/$/m);
+    // Over no file that is there.
+    await writeFile(join(app, ".gitignore"), "mine\n");
+    newProject(app);
+    assert.equal(await readFile(join(app, ".gitignore"), "utf8"), "mine\n");
+
+    // An existing repository: what the studio writes is excluded, once.
+    const repository = join(directory, "repository");
+    await mkdir(repository);
+    execFileSync("git", ["init", "-q", repository]);
+    excludeFromGit(repository, [".elisp-studio.json"]);
+    excludeFromGit(repository, [".elisp-studio.json", ".data/"]);
+    const exclude = await readFile(join(repository, ".git/info/exclude"), "utf8");
+    assert.equal(exclude.split("\n").filter((line) => line === ".elisp-studio.json").length, 1);
+    assert.equal(exclude.split("\n").filter((line) => line === ".data/").length, 1);
+    await writeFile(join(repository, ".elisp-studio.json"), "{}");
+    await mkdir(join(repository, ".data"));
+    await writeFile(join(repository, ".data/app.db"), "secret");
+    await writeFile(join(repository, "app.el"), "(list)");
+    assert.equal(execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: repository, encoding: "utf8" }), "?? app.el\n");
+    // Not a repository: nothing is made.
+    excludeFromGit(app, [".elisp-studio.json"]);
+    assert.equal(existsSync(join(app, ".git")), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("a sibling site without a checkout comes from where it is published, once", async () => {

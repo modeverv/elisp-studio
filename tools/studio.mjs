@@ -33,11 +33,13 @@
 // one are used if they are there; otherwise their published files are
 // fetched once and kept (tools/serve.mjs).
 //
-// DIRECTORY gets the template's files if it has no index.html yet.  For
-// what a save does in Emacs, see lisp/elisp-studio-local.el.
+// DIRECTORY gets the template's files if it has no index.html yet, with
+// what keeps and checks a project (SCAFFOLD).  In a git repository the
+// studio's own files are kept out of git (.git/info/exclude).  For what a
+// save does in Emacs, see lisp/elisp-studio-local.el.
 import { spawn } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cacheDirectory, serve } from "./serve.mjs";
 
@@ -47,6 +49,41 @@ const flag = (name) => args.includes(name);
 const portAt = args.indexOf("--port");
 const port = portAt >= 0 ? Number(args[portAt + 1]) : Number(process.env.PORT || 5190);
 const directory = args.find((arg, index) => !arg.startsWith("--") && args[index - 1] !== "--port");
+
+// What a new project gets besides the template, as the download does
+// (js/studio.js, RUNTIME_FILES): [path in the project, file here, executable].
+export const SCAFFOLD = [
+  [".gitignore", "tools/project/gitignore", false],
+  ["test/run.sh", "tools/project/test/run.sh", true],
+  [".github/workflows/test.yml", "tools/project/test.yml", false],
+];
+
+/** Put the template and SCAFFOLD into DIRECTORY, over no file that is there. */
+export function newProject(directory) {
+  mkdirSync(directory, { recursive: true });
+  cpSync(join(root, "template"), directory, { recursive: true, force: false, errorOnExist: false });
+  for (const [path, source, executable] of SCAFFOLD) {
+    const file = join(directory, path);
+    if (existsSync(file)) continue;
+    mkdirSync(dirname(file), { recursive: true });
+    cpSync(join(root, source), file);
+    if (executable) chmodSync(file, 0o755);
+  }
+}
+
+/** Keep NAMES (.gitignore patterns) out of the git repository at DIRECTORY,
+    if it is one: in .git/info/exclude, which is this clone's own. */
+export function excludeFromGit(directory, names) {
+  const git = join(directory, ".git");
+  if (!existsSync(git) || !statSync(git).isDirectory()) return;
+  const exclude = join(git, "info", "exclude");
+  const lines = existsSync(exclude) ? readFileSync(exclude, "utf8").split("\n").map((line) => line.trim()) : [];
+  const missing = names.filter((name) => !lines.includes(name));
+  if (!missing.length) return;
+  mkdirSync(dirname(exclude), { recursive: true });
+  const text = existsSync(exclude) ? readFileSync(exclude, "utf8") : "";
+  appendFileSync(exclude, `${text && !text.endsWith("\n") ? "\n" : ""}# elisp-studio (tools/studio.mjs)\n${missing.join("\n")}\n`);
+}
 
 /** The browser to start: CHROME_PATH, or the first of the usual places that exists. */
 export function findChrome(env = process.env, exists = existsSync) {
@@ -86,10 +123,12 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     project = resolve(directory);
     if (!existsSync(join(project, "index.html"))) {
       // A new project: what the studio starts one with.
-      mkdirSync(project, { recursive: true });
-      cpSync(join(root, "template"), project, { recursive: true, force: false, errorOnExist: false });
+      newProject(project);
       console.log(`${project}: a new project, from the template`);
     }
+    // What the studio writes there is not for the repository: its address,
+    // and the native server's data (with the users' sessions).
+    excludeFromGit(project, flag("--native-server") ? [".elisp-studio.json", ".data/"] : [".elisp-studio.json"]);
   }
   const chrome = findChrome();
   const profile = join(cacheDirectory, "chrome");

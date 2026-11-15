@@ -48,8 +48,10 @@ import { fileURLToPath } from "node:url";
 const SERVE_PROJECT = fileURLToPath(new URL("serve-project.sh", import.meta.url));
 
 const TEXT = /\.(?:html|el|css|js|mjs|json|txt|md|svg|eld)$/i;
-// What a downloaded project carries besides itself, and what tools leave.
-const NOT_THE_PROJECT = new Set(["vendor", "server", "node_modules"]);
+// What a downloaded project carries besides itself (./fetch-emacs.sh
+// fills vendor/wasmacs and vendor/elisp-react), and what tools leave.
+// Third-party Lisp of the project's own (lib/, vendor/NAME/) is the project.
+const NOT_THE_PROJECT = new Set(["vendor/wasmacs", "vendor/elisp-react", "server", "node_modules"]);
 const LARGEST = 1024 * 1024;
 const FILE_TYPES = {
   ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript",
@@ -81,7 +83,7 @@ export function readProject(directory) {
       if (name.startsWith(".") || name.endsWith("~") || name.startsWith("#") || name.endsWith(".elc")) continue;
       const path = relative ? `${relative}/${name}` : name;
       if (entry.isDirectory()) {
-        if (!relative && NOT_THE_PROJECT.has(name)) continue;
+        if (NOT_THE_PROJECT.has(path)) continue;
         walk(path);
       } else if (entry.isFile() && TEXT.test(name)) {
         const info = statSync(join(directory, path));
