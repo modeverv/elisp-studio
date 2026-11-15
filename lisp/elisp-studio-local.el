@@ -85,6 +85,69 @@ TIMEOUT seconds (5)."
             (with-current-buffer buffer (elisp-studio-local--parse))
           (kill-buffer buffer))))))
 
+;;;; What this Emacs knows of the project
+
+;; Flymake, completion and M-. need react.el (jsx, react-set-state ...) and
+;; the project's own definitions.  The libraries come from the studio, which
+;; has them (a checkout next to it, or its cache), into a directory of this
+;; machine that goes on `load-path' and Flymake's; the project's files are
+;; read for their definitions, which are made here without running the
+;; program.
+
+(defvar elisp-studio-local--libraries-from nil "The studio whose libraries this Emacs has.")
+
+(defun elisp-studio-local--libraries (address)
+  "Fetch react.el and app-server.el from the studio at ADDRESS, once."
+  (unless (equal elisp-studio-local--libraries-from address)
+    (let ((directory (expand-file-name "elisp-studio/lisp/" (or (getenv "XDG_CACHE_HOME") "~/.cache"))))
+      (make-directory directory t)
+      (dolist (library '(("/elisp-react/lisp/react.el" . "react.el") ("/elisp-studio/lisp/app-server.el" . "app-server.el")))
+        (let ((buffer (let ((url-proxy-services nil) (url-show-status nil))
+                        (ignore-errors (url-retrieve-synchronously (concat address (car library)) t t 10)))))
+          (when buffer
+            (unwind-protect
+                (with-current-buffer buffer
+                  (goto-char (point-min))
+                  (when (and (looking-at "HTTP/[0-9.]+ 200") (re-search-forward "\r?\n\r?\n" nil t))
+                    (let ((coding-system-for-write 'no-conversion))
+                      (write-region (point) (point-max) (expand-file-name (cdr library) directory) nil 'silent))))
+              (kill-buffer buffer)))))
+      (add-to-list 'load-path directory)
+      (defvar elisp-flymake-byte-compile-load-path)
+      (add-to-list 'elisp-flymake-byte-compile-load-path directory)
+      (ignore-errors (require 'react))
+      (setq elisp-studio-local--libraries-from address))))
+
+(defun elisp-studio-local-learn-file (file)
+  "Make the top-level definitions of FILE known here, without running it:
+functions and macros are defined, variables declared, components named."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (goto-char (point-min))
+    (let (form)
+      (while (setq form (condition-case nil (read (current-buffer)) (error nil)))
+        (condition-case nil
+            (pcase form
+              (`(,(or 'defun 'defmacro 'defsubst 'cl-defun 'cl-defmacro 'define-inline) ,(and name (pred symbolp)) . ,_)
+               (eval form t)
+               (put name 'definition-name name))
+              (`(,(or 'defvar 'defconst 'defcustom) ,(and name (pred symbolp)) . ,_)
+               (unless (boundp name) (set name nil))
+               (eval `(defvar ,name) t))
+              (`(react-define-component (quote ,(and name (pred symbolp))) . ,_)
+               (unless (fboundp name)
+                 (defalias name (lambda (&rest _) nil) "A component of the project (react-define-component).")))
+              (`(,(or 'cl-defstruct 'define-error) . ,_) (eval form t)))
+          (error nil))))))
+
+(defun elisp-studio-local--learn (directory)
+  "Know the definitions of the project in DIRECTORY; let Flymake find its files."
+  (defvar elisp-flymake-byte-compile-load-path)
+  (add-to-list 'elisp-flymake-byte-compile-load-path directory)
+  (dolist (file (directory-files-recursively directory "\\.el\\'"))
+    (unless (string-match-p "/\\.\\|/vendor/\\|/\\.data/" (file-relative-name file directory))
+      (elisp-studio-local-learn-file file))))
+
 (defun elisp-studio-local--show (report)
   "Show REPORT, the studio's answer to a change."
   (setq elisp-studio-local-last-report report)
@@ -130,6 +193,9 @@ TIMEOUT seconds (5)."
   (let ((project (elisp-studio-local--project)))
     (setq elisp-studio-local--before
           (and project (plist-get (elisp-studio-local--ask (cdr project) "/__project/state") :report)))))
+
+(defun elisp-studio-local--saved-learn ()
+  (when buffer-file-name (elisp-studio-local-learn-file buffer-file-name)))
 
 (defun elisp-studio-local--saved ()
   "The studio sees the saved file by itself; wait for what it says."
@@ -183,11 +249,18 @@ evaluates the definition at point in the running application;
 \\[elisp-studio-local-eval-expression] evaluates an expression there and
 shows its value."
   :lighter " Studio"
+  (when elisp-studio-local-mode
+    (let ((project (elisp-studio-local--project)))
+      (when project
+        (elisp-studio-local--libraries (cdr project))
+        (elisp-studio-local--learn (car project)))))
   (if elisp-studio-local-mode
       (progn (add-hook 'before-save-hook #'elisp-studio-local--saving nil t)
-             (add-hook 'after-save-hook #'elisp-studio-local--saved nil t))
+             (add-hook 'after-save-hook #'elisp-studio-local--saved nil t)
+             (add-hook 'after-save-hook #'elisp-studio-local--saved-learn nil t))
     (remove-hook 'before-save-hook #'elisp-studio-local--saving t)
-    (remove-hook 'after-save-hook #'elisp-studio-local--saved t)))
+    (remove-hook 'after-save-hook #'elisp-studio-local--saved t)
+    (remove-hook 'after-save-hook #'elisp-studio-local--saved-learn t)))
 
 (defun elisp-studio-local--maybe-enable ()
   "Switch `elisp-studio-local-mode' on in the files of a studio's project."

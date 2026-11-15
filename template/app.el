@@ -6,6 +6,11 @@
 ;;
 ;; The library is elisp-react: https://github.com/modeverv/elisp-react
 
+;; The page has it loaded already; an Emacs that checks this file
+;; (Flymake, elisp-studio-local.el) learns from this what jsx and the
+;; react-... functions are.
+(require 'react)
+
 (react-define-component 'Counter
   :initial-state (lambda (props) (list :count (or (plist-get props :start) 0)))
   :render
