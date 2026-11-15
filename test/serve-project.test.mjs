@@ -43,6 +43,53 @@ async function startServer(directory, environment = {}) {
            stop: () => new Promise((resolve) => { if (exited !== null) resolve(); else { child.once("exit", resolve); child.kill("SIGTERM"); } }) };
 }
 
+test("server.el's headers replace the server's own: on /api/ answers, and on files by app-server-file-headers", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "serve-project-headers-"));
+  await cp(join(root, "template"), directory, { recursive: true });
+  await mkdir(join(directory, "assets"));
+  await writeFile(join(directory, "assets/logo.svg"), "<svg/>");
+  await writeFile(join(directory, "server.el"), `;;; -*- lexical-binding: t; -*-
+(setq app-server-file-headers
+      '(("\\\\.svg\\\\'" ("Cache-Control" . "public, max-age=60"))
+        ("\\\\\`/assets/" ("Cache-Control" . "public, max-age=31536000, immutable") ("X-Frame-Options" . "DENY"))))
+(defun app-server-handle (method path _body)
+  (pcase (list method path)
+    ('("GET" "/api/cached")
+     (app-server-set-header "Cache-Control" "public, max-age=900")
+     (app-server-set-header "Referrer-Policy" "no-referrer")
+     "kept")
+    ('("GET" "/api/plain") "plain")
+    (_ (signal 'file-missing (list "No such API" path)))))
+`);
+  const server = await startServer(directory);
+  try {
+    // One of each header, server.el's where it gave one.  (fetch joins
+    // two headers of one name with ", ".)
+    const cached = (await fetch(`${server.origin}/api/cached`)).headers;
+    assert.equal(cached.get("cache-control"), "public, max-age=900");
+    assert.equal(cached.get("referrer-policy"), "no-referrer");
+    assert.equal(cached.get("cross-origin-resource-policy"), "same-origin");
+    assert.equal(cached.get("x-frame-options"), "SAMEORIGIN");
+    const plain = (await fetch(`${server.origin}/api/plain`)).headers;
+    assert.equal(plain.get("cache-control"), "no-store");
+    assert.equal(plain.get("referrer-policy"), "strict-origin-when-cross-origin");
+    // Files: the matching entries, the later one winning; others as ever.
+    const logo = await fetch(`${server.origin}/assets/logo.svg`);
+    assert.equal(logo.headers.get("cache-control"), "public, max-age=31536000, immutable");
+    assert.equal(logo.headers.get("x-frame-options"), "DENY");
+    assert.ok(logo.headers.get("etag"));
+    const notChanged = await fetch(`${server.origin}/assets/logo.svg`, { headers: { "If-None-Match": logo.headers.get("etag") } });
+    assert.equal(notChanged.status, 304);
+    assert.equal(notChanged.headers.get("cache-control"), "public, max-age=31536000, immutable");
+    const style = (await fetch(`${server.origin}/style.css`)).headers;
+    assert.equal(style.get("cache-control"), "no-cache");
+    assert.equal(style.get("x-frame-options"), "SAMEORIGIN");
+  } finally {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("the template project runs under a native Emacs: files, server.el, kept data", async () => {
   const directory = await mkdtemp(join(tmpdir(), "elisp-studio-project-"));
   await cp(join(root, "template"), directory, { recursive: true });
@@ -988,7 +1035,7 @@ test("what the security check found stays fixed", async () => {
     assert.equal(page.headers.get("x-frame-options"), "SAMEORIGIN");
     assert.equal(page.headers.get("content-security-policy"), "frame-ancestors 'self'; form-action 'self'; base-uri 'self'; object-src 'none'");
     assert.equal((await fetch(`${server.origin}/api/hello`)).headers.get("cross-origin-resource-policy"), "same-origin");
-    assert.equal(page.headers.get("referrer-policy"), "same-origin");
+    assert.equal(page.headers.get("referrer-policy"), "strict-origin-when-cross-origin");
 
     // What goes wrong inside a handler is for the log; the visitor is told what server.el says on purpose.
     assert.deepEqual([await status(request("GET /api/said")), (await answer(request("GET /api/said"))).body], [400, '"Said on purpose"']);

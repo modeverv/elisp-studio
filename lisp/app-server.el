@@ -289,6 +289,18 @@ server only listens to this machine."
   (push (cons name value) (app-server--request-response-headers (app-server--current-request)))
   nil)
 
+(defvar app-server-file-headers nil
+  "Headers for the project's own files, as a native Emacs serves them.
+A list of (REGEXP . HEADERS): a file whose path (\"/assets/logo.png\")
+matches REGEXP gets HEADERS, a list of (NAME . VALUE), which replace the
+server's headers of the same name; a later entry replaces an earlier one.
+Files under /assets/ that never change, kept by browsers for a year:
+
+  (setq app-server-file-headers
+        \='((\"\\\\`/assets/\" (\"Cache-Control\" . \"public, max-age=31536000, immutable\"))))
+
+In the studio the files come from the editor, without these headers.")
+
 (defun app-server-set-cookie (name value &rest attributes)
   "Give the visitor's browser the cookie NAME with VALUE (a string).
 ATTRIBUTES is a plist:
