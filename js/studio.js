@@ -506,6 +506,10 @@ async function startPreview(project, why) {
       wasmacs: WASMACS.href,
       sources: built.sources.map(({ name, text }) => ({ name, text })),
       fetch: applicationFetch,
+      // "restart app" is a start from the files as they are: no compiled
+      // code kept from an earlier start (it may have been compiled against
+      // another version of a file's macros).
+      cache: why !== "restarted",
     }), startedOnce ? START_TIMEOUT_MS : FIRST_START_TIMEOUT_MS, "the application");
     if (mine !== generation) return;
     startedOnce = true;
@@ -631,6 +635,15 @@ async function applyProject(next) {
       try {
         const loaded = await withTimeout(preview.app.load(preview.sources.get(path), next.get(path)), LOAD_TIMEOUT_MS, "the application");
         if (loaded.log) logs.push(editorLog(loaded.log, loaded, path));
+        if (loaded.renderError) {
+          // The definitions are in; the render that followed failed: that
+          // is what to say, with the component it failed in.
+          const error = loaded.renderError;
+          const text = `${error.symbol ? `${error.symbol}: ` : ""}${error.message}`;
+          showError(text);
+          report("error", `${path}: loaded, but the application failed to render`, [...logs, text].join("\n\n"));
+          return;
+        }
         done.push(path);
       } catch (error) {
         if (/did not answer/.test(error.message)) {

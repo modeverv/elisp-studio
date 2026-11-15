@@ -213,6 +213,16 @@ try {
   await appUntil("document.querySelector('.greeting-word')?.textContent === 'good morning'", "a change of data alone renders again");
   pass("a change of data alone (a defconst) renders the application again, :pure components too");
 
+  // A save whose definitions load but whose render fails says so, with the
+  // component; the next good save clears it.
+  await writeFile(join(project, "app.el"), ";;; -*- lexical-binding: t; -*-\n(react-define-component 'Greeting :pure t :render (lambda (_self) (jsx (p (:class \"greeting-word\") (car 1)))))\n");
+  await until("/app\\.el: loaded, but the application failed to render/.test(document.querySelector('#status').textContent)", "a failed render is reported as such");
+  assert.match(await js("document.querySelector('#error').textContent"), /Wrong type argument: listp, 1, in Greeting/);
+  await writeFile(join(project, "app.el"), ";;; -*- lexical-binding: t; -*-\n(react-define-component 'Greeting :pure t :render (lambda (_self) (jsx (p (:class \"greeting-word\") words-greeting))))\n(react-mount '(Greeting) \"#app\")\n");
+  await until("/app\\.el updated/.test(document.querySelector('#status').textContent) && document.querySelector('#error').textContent === ''", "the next good save clears it");
+  await appUntil("document.querySelector('.greeting-word')?.textContent === 'good morning'", "and renders");
+  pass("a save that loads but fails to render is reported as that, naming the component; the next good save clears it");
+
   // No isolation on this machine: there is no editor in the page.
   assert.deepEqual(await js("[window.crossOriginIsolated, document.querySelector('#preview').contentWindow.crossOriginIsolated]"), [false, false]);
   assert.equal((await fetch(`${origin}/elisp-studio/`)).headers.get("cross-origin-embedder-policy"), null);

@@ -67,7 +67,7 @@ While you type, Flymake marks what the byte compiler would complain about: the e
 
 ![After C-x C-s: the title on the right is the new one, the clock runs on, Emacs says "no reload, state kept"](doc/images/live-reload.png)
 
-A mistake does not take the application down: if the new code does not load, the error is shown under the application and the old code keeps running. An endless loop does take it down, and only it: the studio starts a new application at the next save, and Emacs keeps editing. The "restart app" button starts the application again from the files.
+A mistake does not take the application down: if the new code does not load, the error is shown under the application and the old code keeps running. If it loads but the application then fails to render, the studio says that ("loaded, but the application failed to render"), with the component the error came from and those above it; the components that did not fail go on. An endless loop does take it down, and only it: the studio starts a new application at the next save, and Emacs keeps editing. The "restart app" button starts the application again from the files.
 
 The application has an address even though the preview is a frame without one: elisp-react keeps it in memory there (`react-location`, `react-navigate`), and the bar above the application shows it. Hash links in the application stay in the preview; type an address and press Enter to go there, or use ← and → for Back and Forward.
 
@@ -413,7 +413,7 @@ node tools/record-demo.mjs   # record the pictures of this README again (needs f
 - Chrome on a desktop. Two Emacsen run in the tab: several hundred megabytes of memory.
 - One project.
 - After a hot change, `:initial-state` and `:did-mount` of existing components are not run again; use "restart app" for a clean start. Taking definitions out reads the files' top-level forms (`defun`, `defmacro`, `defvar`, `defconst`, `defalias`, `react-define-component` and the like); something defined another way stays.
-- Errors that happen while the application runs have no location.
+- Errors that happen while the application runs name the component they came from and those above it, not a file and a line.
 - The editing Emacs expands the project's macros when it checks a buffer. A macro that loops forever would hang the editor.
 - Pushing to GitHub has been tested only against a repository inside Emacs's own filesystem; the path through the companion extension is wasmacs's and is tested there.
 - The server in the tab keeps its data directory in memory and the studio copies it to IndexedDB after a request that changed it: fine for a small database, not for a large one.

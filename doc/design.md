@@ -157,6 +157,6 @@ The window is Chrome with `--app` and a profile of its own. Sibling sites withou
 
 - More than one project, and a way to start a new one from the page.
 - For a project in a directory: `server.el` in a native Emacs next to the window (it runs in the tab), and the page's Emacs and the directory kept in step with each other.
-- Locations for errors that happen while the application runs.
+- File and line for errors that happen while the application runs (they name the component and those above it).
 - A language server for anything but Emacs Lisp: Eglot is there, a server program for wasmacs's process service is not.
 - A button for the whole way to a public URL (create the repository, push, enable Pages).
