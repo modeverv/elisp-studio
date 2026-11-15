@@ -388,6 +388,24 @@ try {
   await appUntil("document.querySelector('#banner')?.textContent === 'My page' && document.querySelectorAll('.message').length === 3", "everything is still there after a reload");
   assert.deepEqual(await messages(), ["Hello from the server's Emacs", "first", "SECOND"]);
   pass("after a reload of the studio, the project and the server's data are as they were");
+
+  // A project whose Lisp is not app.el, as an existing repository may be:
+  // the studio opens what index.html loads and writes nothing next to it.
+  await emacsUntil(`(progn
+    (when (get-buffer "app.el") (kill-buffer "app.el"))
+    (when (file-exists-p "/home/user/elisp-studio/app/app.el")
+      (rename-file "/home/user/elisp-studio/app/app.el" "/home/user/elisp-studio/app/main.el"))
+    (message "renamed-%s" (file-exists-p "/home/user/elisp-studio/app/main.el")))`, /renamed-t/, "app.el is renamed main.el");
+  await editFile("index.html", 'src="app.el"', 'src="main.el"');
+  // The editor stores its files as it sends them to the studio.
+  await until("window.elispStudio.files.has('main.el') && !window.elispStudio.files.has('app.el') && window.elispStudio.preview?.sources?.has('main.el')", "the studio has main.el");
+  await appUntil("document.querySelector('h1')?.textContent === 'Back'", "the application runs main.el");
+  await pause(1000);
+  await client.send("Page.navigate", { url: `${origin}/elisp-studio/` }, sessionId);
+  await appUntil("document.querySelector('#banner')?.textContent === 'My page' && document.querySelector('h1')?.textContent === 'Back'", "the application after a reload");
+  await emacsUntil('(message "visiting-%s-%s" (buffer-name) (file-exists-p "/home/user/elisp-studio/app/app.el"))',
+    /visiting-main\.el-nil/, "Emacs visits main.el and has not written an app.el");
+  pass("a project without app.el is left as it is: Emacs opens the Lisp that index.html loads");
   console.log("e2e passed");
 } catch (error) {
   // What the studio and Emacs showed when it went wrong.

@@ -100,12 +100,28 @@ async function editorForms() {
     if (response.ok) template.push([name, await response.text()]);
   }
   return [
+    // A project exists when it has an index.html (its Lisp need not be
+    // app.el): then nothing is written.  A new one gets the template's
+    // files, never over a file that is there.
     `(progn
       (setq make-backup-files nil auto-save-default nil)
-      (unless (file-exists-p ${lispString(`${PROJECT}/app.el`)})
+      (unless (file-exists-p ${lispString(`${PROJECT}/index.html`)})
         (make-directory ${lispString(PROJECT)} t)
-        ${template.map(([name, content]) => `(write-region ${lispString(content)} nil ${lispString(`${PROJECT}/${name}`)} nil 'silent)`).join("\n        ")}))`,
-    `(find-file ${lispString(`${PROJECT}/app.el`)})`,
+        ${template.map(([name, content]) => `(unless (file-exists-p ${lispString(`${PROJECT}/${name}`)})
+          (write-region ${lispString(content)} nil ${lispString(`${PROJECT}/${name}`)} nil 'silent))`).join("\n        ")}))`,
+    // The first Lisp file index.html loads, or app.el.
+    String.raw`(find-file
+      (let ((index ` + lispString(`${PROJECT}/index.html`) + String.raw`) (found nil))
+        (when (file-exists-p index)
+          (with-temp-buffer
+            (insert-file-contents index)
+            (goto-char (point-min))
+            (while (and (not found) (re-search-forward "<script[^>]*>" nil t))
+              (let ((tag (match-string 0)))
+                (when (and (string-match-p "text/emacs-lisp" tag)
+                           (string-match "src=[\"']\\([^\"']+\\)" tag))
+                  (setq found (expand-file-name (match-string 1 tag) ` + lispString(PROJECT) + String.raw`)))))))
+        (or found ` + lispString(`${PROJECT}/app.el`) + `)))`,
     // The libraries the project is written with, so that this Emacs can
     // complete, describe and find their functions.  They are files: M-.
     // needs a place to go to.

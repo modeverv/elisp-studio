@@ -29,7 +29,7 @@ Emacs Lisp の Web アプリケーションをブラウザの中で書き、リ�
 3. Emacs で `app.el` の文字列（たとえば `"Count: %d"`）を書き換え、`C-x C-s` で保存します。
 4. アプリケーションの表示が新しい文字列に変わります。カウンターの数はそのままです。
 
-プロジェクトは Emacs のファイルシステムの `/home/user/elisp-studio/app` にあります。ブラウザが保持するので、次に開いたときも残っています。新しいプロジェクトは `template/` から作られます。アドレスに `?example=stopwatch`、`?example=sqlite`、`?example=upload` のいずれかを付けると、`examples/` の該当するディレクトリから作られます。すでにあるプロジェクトが置き換えられることはありません（最初からやり直すには、Emacs の中でこのディレクトリを削除します）。これは wasmacs のページが使っているのと同じ `/home/user` なので、wasmacs を直接開いたときにもプロジェクトが見えます。ファイルは次のとおりです。
+プロジェクトは Emacs のファイルシステムの `/home/user/elisp-studio/app` にあります。ブラウザが保持するので、次に開いたときも残っています。新しいプロジェクトは `template/` から作られます。アドレスに `?example=stopwatch`、`?example=sqlite`、`?example=upload` のいずれかを付けると、`examples/` の該当するディレクトリから作られます。`index.html` のあるディレクトリはプロジェクトとして扱われ、そのまま使われます。Emacs は `index.html` が読み込む最初の Emacs Lisp ファイル（テンプレートでは `app.el`）を開き、すでにあるファイルを上書きすることはありません（最初からやり直すには、Emacs の中でこのディレクトリを削除します）。これは wasmacs のページが使っているのと同じ `/home/user` なので、wasmacs を直接開いたときにもプロジェクトが見えます。ファイルは次のとおりです。
 
 ```text
 index.html   ページ。<div id="app">、スタイルシート、<script type="text/emacs-lisp" src="app.el">
@@ -412,7 +412,7 @@ node tools/record-demo.mjs   # この README の画像を録画し直す（ffmpe
 ## 制限
 
 - デスクトップの Chrome が対象です。タブの中で Emacs が2つ動くので、メモリを数百MB使います。
-- プロジェクトは1つです。
+- ページの中のプロジェクトは1つです。既存のリポジトリは、`M-x shell` の `git clone`（wasmacs の companion 拡張を通します）か、wasmacs のページで読み込む `.wasifs` イメージで持ち込めます。ディスク上のディレクトリには、ローカルモード（`node tools/studio.mjs DIR`）を使います。
 - ホットリロードのあと、既存のコンポーネントの `:initial-state` と `:did-mount` は実行し直されません。最初からやり直すには「restart app」を使います。定義を消す処理は、ファイルのトップレベルの式（`defun`、`defmacro`、`defvar`、`defconst`、`defalias`、`react-define-component` など）を読みます。ほかの方法で定義したものは残ります。
 - アプリケーションの実行中に起きたエラーは、それが起きた部品とその上の部品の名前を示しますが、ファイルと行は示しません。
 - 編集中の Emacs は、バッファを検査するときにプロジェクトのマクロを展開します。無限ループするマクロを書くと、エディタが固まります。
