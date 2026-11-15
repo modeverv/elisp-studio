@@ -39,6 +39,9 @@
 ;;
 ;;   PUBLIC_ORIGIN=https://example.com tools/serve-project.sh DIRECTORY
 ;;
+;; Pages of other sites are refused /api/, unless CORS_ORIGINS names their
+;; site (`serve-project-cors-origins').
+;;
 ;; The proxy does HTTPS and compression.  This server keeps connections
 ;; open for it, reads what it forwards (`app-server-header': x-forwarded-for,
 ;; x-forwarded-proto, cookie), limits and times out requests, and lets the
@@ -60,6 +63,23 @@
 Pages of these origins may use /api/, besides the pages this server
 serves itself.  From the environment: PUBLIC_ORIGIN=https://example.com
 \(several: separated by commas).")
+
+(defvar serve-project-cors-origins
+  (mapcar (lambda (origin) (string-trim-right origin "/+"))
+          (split-string (or (getenv "CORS_ORIGINS") "") "[ ,]+" t))
+  "Origins of other sites whose pages may use /api/ (CORS).
+From the environment: CORS_ORIGINS=https://app.example.net (several:
+separated by commas).  Their requests reach server.el, this server
+answers their preflights, and the answers say that those pages may read
+them.  Without `serve-project-cors-credentials' their requests reach
+server.el without cookies.")
+
+(defvar serve-project-cors-credentials
+  (and (member (downcase (or (getenv "CORS_CREDENTIALS") "")) '("1" "yes" "true")) t)
+  "Non-nil if pages of `serve-project-cors-origins' may send cookies.
+From the environment: CORS_CREDENTIALS=yes.  Such a page then acts with
+the visitor's session, so only for origins trusted as much as this one.
+The cookie has to be SameSite=None for a browser to send it.")
 
 (defvar serve-project-default-headers
   '(("X-Content-Type-Options" . "nosniff")
@@ -214,7 +234,7 @@ is the part of it from byte START up to END."
   ;; An answer that comes later may find that the visitor has left.
   (when (process-live-p process)
     (let* ((keep (and (not close) (process-get process :keep)))
-           (bare (string-prefix-p "304" status))
+           (bare (or (string-prefix-p "304" status) (string-prefix-p "204" status)))
            (from (if (consp file) (nth 1 file) 0))
            (to (and (consp file) (nth 2 file)))
            (file (if (consp file) (car file) file))
@@ -461,13 +481,36 @@ that name."
                                   (list host (replace-regexp-in-string ":[0-9]+\\'" "" host))))
                               serve-project-origins)))))
 
+(defun serve-project--cors-origin (headers)
+  "The Origin of HEADERS if it is one of `serve-project-cors-origins'."
+  (car (member (cdr (assoc "origin" headers)) serve-project-cors-origins)))
+
+(defun serve-project--cors-headers (origin)
+  "What tells a browser that the page of ORIGIN may read the answer."
+  (append (list (cons "Access-Control-Allow-Origin" origin) '("Vary" . "Origin"))
+          (and serve-project-cors-credentials '(("Access-Control-Allow-Credentials" . "true")))))
+
+(defun serve-project--preflight (process origin headers)
+  "Answer the preflight of a page of ORIGIN, whose request has HEADERS."
+  (let ((asked (cdr (assoc "access-control-request-headers" headers))))
+    (serve-project--respond
+     process "204 No Content" nil ""
+     (append (serve-project--cors-headers origin)
+             '(("Access-Control-Allow-Methods" . "GET, POST, PUT, PATCH, DELETE")
+               ("Access-Control-Max-Age" . "600"))
+             (and asked (string-match-p "\\`[-A-Za-z0-9, ]*\\'" asked)
+                  (list (cons "Access-Control-Allow-Headers" asked)))))))
+
 (defun serve-project--foreign-p (headers)
-  "Non-nil if the request with HEADERS was made by a page of another site."
+  "Non-nil if the request with HEADERS was made by a page of another site.
+A page of `serve-project-cors-origins' is not."
   (let ((origin (cdr (assoc "origin" headers))))
-    (or (and origin (not (serve-project--own-origin-p origin)))
+    (and
+     (not (serve-project--cors-origin headers))
+     (or (and origin (not (serve-project--own-origin-p origin)))
         ;; Browsers say so themselves, also for requests without an Origin
         ;; (a picture, a link): no page of another site has business here.
-        (equal (cdr (assoc "sec-fetch-site" headers)) "cross-site"))))
+        (equal (cdr (assoc "sec-fetch-site" headers)) "cross-site")))))
 
 (defun serve-project--handle (process method target headers body &optional upload)
   (let ((path (car (split-string target "?")))
@@ -476,20 +519,34 @@ that name."
      ((not (serve-project--own-host-p (cdr (assoc "host" headers))))
       (serve-project--respond process "421 Misdirected Request" "text/plain" "this server is not that host"))
      ((string-prefix-p "/api/" path)
-      (if (serve-project--foreign-p headers)
-          (serve-project--answer process 403 "\"requests from other sites are refused\"" nil)
-        ;; A handler may answer later (`app-server-defer'): then there is no
-        ;; answer yet, the connection stays open and this server goes on.
-        (let ((answer (app-server-respond
-                       method target (decode-coding-string body 'utf-8)
-                       (lambda (status text headers) (serve-project--answer process status text headers))
-                       ;; What a proxy says about the visitor counts only
-                       ;; when there is a proxy; otherwise the visitor wrote it.
-                       (if serve-project-origins
-                           headers
-                         (seq-remove (lambda (header) (string-prefix-p "x-forwarded-" (car header))) headers))
-                       upload)))
-          (when answer (serve-project--answer process (aref answer 0) (aref answer 1) (aref answer 2))))))
+      (let* ((cors (serve-project--cors-origin headers))
+             (allowed (and cors (serve-project--cors-headers cors)))
+             (answer-with (lambda (status text headers)
+                            (serve-project--answer process status text
+                                                   (serve-project--merge-headers allowed headers)))))
+        (cond
+         ((and cors (equal method "OPTIONS") (assoc "access-control-request-method" headers))
+          (serve-project--preflight process cors headers))
+         ((serve-project--foreign-p headers)
+          (serve-project--answer process 403 "\"requests from other sites are refused\"" nil))
+         (t
+          ;; A handler may answer later (`app-server-defer'): then there is no
+          ;; answer yet, the connection stays open and this server goes on.
+          (let ((answer (app-server-respond
+                         method target (decode-coding-string body 'utf-8)
+                         answer-with
+                         (seq-remove
+                          (lambda (header)
+                            (or
+                             ;; What a proxy says about the visitor counts only
+                             ;; when there is a proxy; otherwise the visitor wrote it.
+                             (and (not serve-project-origins) (string-prefix-p "x-forwarded-" (car header)))
+                             ;; A page of another site acts without the
+                             ;; visitor's session, unless allowed to.
+                             (and cors (not serve-project-cors-credentials) (equal (car header) "cookie"))))
+                          headers)
+                         upload)))
+            (when answer (funcall answer-with (aref answer 0) (aref answer 1) (aref answer 2))))))))
      ((not (member method '("GET" "HEAD")))
       (serve-project--respond process "405 Method Not Allowed" "text/plain" "method not allowed"))
      (t

@@ -8,6 +8,9 @@
 #                          (server/deploy/ has configurations)
 #   WORKERS=4 ./run.sh     four Emacs processes, on PORT to PORT+3, for a
 #                          proxy to spread the requests over: four cores
+#   CORS_ORIGINS=https://front.example.net ./run.sh
+#                          pages of that site may use /api/ (without the
+#                          visitor's cookies unless CORS_CREDENTIALS=yes)
 #
 # Needs bash and a native GNU Emacs (29 or later; with SQLite support if
 # server.el uses a database).  Emacs serves the files of this directory and
