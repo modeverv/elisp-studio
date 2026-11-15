@@ -7,6 +7,14 @@
     <!-- The editor is Emacs with SharedArrayBuffer: this page has to be
          cross-origin isolated.  On hosts that do not send the headers
          (GitHub Pages) this service worker adds them. -->
+    <script>
+      // A project in a directory (?project=local) has no editor here: no
+      // isolation, so that third-party frames work in the preview; a service
+      // worker left from the studio in the page is taken away.
+      if (new URLSearchParams(location.search).get("project") === "local") {
+        window.coi = { shouldRegister: () => false, shouldDeregister: () => true, quiet: true };
+      }
+    </script>
     <script src="coi-serviceworker.js"></script>
     <style>
       html, body { height: 100%; margin: 0; }

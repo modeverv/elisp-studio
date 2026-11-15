@@ -171,6 +171,11 @@ try {
   }
   pass("the application fetches and shows the project's own files (data.json, an image); server.el and hidden files are not served");
 
+  // No isolation on this machine: there is no editor in the page.
+  assert.deepEqual(await js("[window.crossOriginIsolated, document.querySelector('#preview').contentWindow.crossOriginIsolated]"), [false, false]);
+  assert.equal((await fetch(`${origin}/elisp-studio/`)).headers.get("cross-origin-embedder-policy"), null);
+  pass("on this machine the studio and its preview are not cross-origin isolated (third-party frames need no credentialless)");
+
   // Not a file of a project: the mode stays off, and saving asks nobody.
   const elsewhere = join(workDir, "elsewhere.el");
   await writeFile(elsewhere, "(list)");

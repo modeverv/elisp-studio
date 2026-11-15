@@ -199,7 +199,7 @@ test("the window: an application window of Chrome with a profile of its own", as
   try {
     const run = (...args) => JSON.parse(execFileSync(process.execPath, [join(root, "tools/studio.mjs"), ...args, "--print"], { encoding: "utf8" }).replace(/^[^{]*/, ""));
     const local = run(directory, "--port", "5222", "--kiosk");
-    assert.equal(local.page, "http://127.0.0.1:5222/elisp-studio/?project=local");
+    assert.equal(local.page, "http://localhost:5222/elisp-studio/?project=local");
     assert.equal(local.project, directory);
     assert.equal(local.arguments.includes("--kiosk"), true);
     // It got the template's files, and keeps what it has the next time.

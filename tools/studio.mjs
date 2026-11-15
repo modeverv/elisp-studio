@@ -90,7 +90,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   }
   const chrome = findChrome();
   const profile = join(cacheDirectory, "chrome");
-  const page = `http://127.0.0.1:${port}/elisp-studio/${project ? "?project=local" : ""}`;
+  // localhost, not 127.0.0.1: some embedded players (YouTube's) refuse a
+  // page whose Referer is an IP address.
+  const page = `http://${project ? "localhost" : "127.0.0.1"}:${port}/elisp-studio/${project ? "?project=local" : ""}`;
   if (flag("--print")) {
     console.log(JSON.stringify({ page, project, chrome, arguments: chromeArguments(page, profile, { kiosk: flag("--kiosk") }) }, null, 2));
     process.exit(0);

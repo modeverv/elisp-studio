@@ -358,7 +358,7 @@ Both open an application window of Chrome: no tabs, no address bar, and a profil
 
 **The first form** is the studio as on the web, served from the clone: Emacs in the page, the project in the browser's storage.
 
-**The second form** has no Emacs in the page. The project is the directory (a new one gets the template's files), and the window shows the application and follows the directory: a file saved there, by whatever saved it, is applied as a save in the page's Emacs would be. A changed `.el` file is evaluated in the running application, whose state stays; a stylesheet is swapped; `index.html` starts it again.
+**The second form** has no Emacs in the page. The project is the directory (a new one gets the template's files), and the window shows the application and follows the directory: a file saved there, by whatever saved it, is applied as a save in the page's Emacs would be. A changed `.el` file is evaluated in the running application, whose state stays; a stylesheet is swapped; `index.html` starts it again. This window is not cross-origin isolated (there is no Emacs in it that needs `SharedArrayBuffer`), so third-party frames such as a YouTube player work in the application as on a site, and it opens at `http://localhost:PORT`, since some players refuse a page whose address is an IP address.
 
 That needs nothing in Emacs. For what a window cannot do by itself there is `lisp/elisp-studio-local.el`; load it in the Emacs you edit with (the script prints the line), and in the files of such a project:
 
