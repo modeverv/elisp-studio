@@ -29,7 +29,7 @@ Both halves are Emacs. On the left is the real GNU Emacs 30.2, running in the pa
 3. In Emacs, change a text in `app.el`, for example `"Count: %d"`, and save with `C-x C-s`.
 4. The application shows the new text, and the counter still has its count.
 
-The project is `/home/user/elisp-studio/app` in Emacs's filesystem, which the browser keeps: it is still there at the next visit. A new project starts from `template/`, or, with `?example=stopwatch`, `?example=sqlite` or `?example=upload` in the address, from that directory of `examples/`; a project that exists is never replaced (remove the directory in Emacs to start over). It is the same `/home/user` that the wasmacs page itself uses, so the project is also there when you open wasmacs directly. Its files:
+The project is `/home/user/elisp-studio/app` in Emacs's filesystem, which the browser keeps: it is still there at the next visit. A new project starts from `template/`, or, with `?example=stopwatch`, `?example=sqlite` or `?example=upload` in the address, from that directory of `examples/`. A directory with an `index.html` is a project and is left as it is: Emacs opens the first Emacs Lisp file that `index.html` loads (`app.el` in the template), and no file that is there is written over (remove the directory in Emacs to start over). It is the same `/home/user` that the wasmacs page itself uses, so the project is also there when you open wasmacs directly. Its files:
 
 ```text
 index.html   the page: a <div id="app">, the stylesheet, <script type="text/emacs-lisp" src="app.el">
@@ -412,7 +412,7 @@ node tools/record-demo.mjs   # record the pictures of this README again (needs f
 ## Limits
 
 - Chrome on a desktop. Two Emacsen run in the tab: several hundred megabytes of memory.
-- One project.
+- One project in the page. An existing repository comes in with `git clone` in `M-x shell` (through the wasmacs companion extension) or as a `.wasifs` image imported on the wasmacs page; for a directory on your disk, use the local mode (`node tools/studio.mjs DIR`).
 - After a hot change, `:initial-state` and `:did-mount` of existing components are not run again; use "restart app" for a clean start. Taking definitions out reads the files' top-level forms (`defun`, `defmacro`, `defvar`, `defconst`, `defalias`, `react-define-component` and the like); something defined another way stays.
 - Errors that happen while the application runs name the component they came from and those above it, not a file and a line.
 - The editing Emacs expands the project's macros when it checks a buffer. A macro that loops forever would hang the editor.
