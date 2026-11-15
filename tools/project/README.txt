@@ -51,9 +51,16 @@ tell the server the address it is published under:
   PUBLIC_ORIGIN=https://example.com ./run.sh
 
 server/deploy/ has what that takes: a Caddyfile, an nginx.conf, and a
-systemd unit that keeps run.sh running.  With vendor/ here, those two
-let the proxy send /vendor/ itself (put this directory's path where they
-say /srv/app): Emacs sends one large file at a time, a proxy many.
+systemd unit that keeps run.sh running.  Those are written for
+
+  PUBLIC_ORIGIN=https://example.com WORKERS=4 PROXY_SENDS_FILES=yes ./run.sh
+
+four Emacs processes, and the proxy sends the files: Emacs sends one
+large file at a time, a proxy many, so Emacs only says which file may go
+(put this directory's path where the two say /srv/app).  Use
+PROXY_SENDS_FILES with those configurations only.  What server.el keeps
+in a Lisp variable is known to one of the four processes; WORKERS=1 for
+an application that needs that.
 
 Start the server with run.sh, not with "emacs --batch" directly: run.sh
 makes Emacs ignore the signal that a visitor who hangs up in the middle of

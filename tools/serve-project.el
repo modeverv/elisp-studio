@@ -80,6 +80,16 @@ An answer is sent in pieces of a quarter of a megabyte; a visitor who does
 not take one in this time (slower than 9 KB a second, or not reading at
 all) loses the connection.  Emacs sends one large answer at a time, and
 each visitor who lets one wait holds everybody else's up.")
+(defvar serve-project-proxy-sends-files
+  (and (member (downcase (or (getenv "PROXY_SENDS_FILES") "")) '("1" "yes" "true")) t)
+  "Non-nil: the reverse proxy in front sends the larger files itself.
+This server still decides whether a file may be sent, and to whom; then it
+answers with the file's name in an X-Accel-Redirect header instead of the
+file, and the proxy sends it (nginx knows that header; the shipped
+Caddyfile teaches it to Caddy).  Emacs sends one large answer at a time
+and waits for each visitor; a proxy does neither.  From the environment:
+PROXY_SENDS_FILES=yes, together with PUBLIC_ORIGIN.  Only with a proxy that
+is configured for it: any other would pass an empty answer on.")
 (defvar serve-project-log t "Non-nil: one line per request on standard error.")
 (defvar serve-project-workers (max 1 (string-to-number (or (getenv "WORKERS") "1")))
   "How many server processes share the project (WORKERS=4 ./run.sh).
@@ -318,6 +328,27 @@ files this way: each one is a part of one large file."
             ((< end start) nil)
             (t (list start (1+ (min end (1- size)))))))))
 
+(defconst serve-project--hand-off-prefix "/.files/"
+  "Where the proxy finds the project's directory for the files it sends.
+A name with a dot in front: this server sends nothing under such a name,
+so no file of the project is hidden by it.")
+(defconst serve-project--hand-off-size (* 16 1024)
+  "Files up to this size are sent by this server itself: one write.")
+
+(defun serve-project--hand-off (file)
+  "What to tell the proxy so that it sends FILE, or nil: then this server does.
+FILE has been found fit to send.  The proxy sends the larger files of the
+project's directory when `serve-project-proxy-sends-files' says so and
+there is a proxy (`serve-project-origins')."
+  (and serve-project-proxy-sends-files
+       serve-project-origins
+       (string-prefix-p serve-project--root file)
+       (> (or (file-attribute-size (file-attributes file)) 0) serve-project--hand-off-size)
+       (concat serve-project--hand-off-prefix
+               (mapconcat #'url-hexify-string
+                          (split-string (substring file (length serve-project--root)) "/")
+                          "/"))))
+
 (defun serve-project--gzip-p (header)
   "Non-nil if the Accept-Encoding HEADER of a request takes gzip."
   (and header
@@ -367,16 +398,22 @@ TEXT is (:file FILE :type TYPE :name NAME) when the answer is a file."
     (if (stringp text)
         (serve-project--respond process line "application/x-emacs-lisp; charset=utf-8"
                                 (encode-coding-string text 'utf-8) headers close)
-      (let ((name (plist-get text :name)))
-        (serve-project--respond
-         process line (plist-get text :type) ""
-         (if name
-             (cons (cons "Content-Disposition"
-                         (format "attachment; filename=\"%s\""
-                                 (replace-regexp-in-string "[^A-Za-z0-9._ -]" "_" name)))
-                   headers)
-           headers)
-         close (plist-get text :file))))))
+      (let* ((name (plist-get text :name))
+             (headers (if name
+                          (cons (cons "Content-Disposition"
+                                      (format "attachment; filename=\"%s\""
+                                              (replace-regexp-in-string "[^A-Za-z0-9._ -]" "_" name)))
+                                headers)
+                        headers))
+             ;; The handler has decided that this visitor gets the file;
+             ;; a proxy that sends files sends it.
+             (hand-off (and (= status 200)
+                            (serve-project--hand-off (expand-file-name (plist-get text :file))))))
+        (if hand-off
+            (serve-project--respond process line (plist-get text :type) ""
+                                    (cons (cons "X-Accel-Redirect" hand-off) headers) close)
+          (serve-project--respond process line (plist-get text :type) "" headers
+                                  close (plist-get text :file)))))))
 
 (defun serve-project--own-origin-p (origin)
   "Non-nil if pages of ORIGIN are this application's own."
@@ -438,6 +475,12 @@ that name."
           ;; changed; the answer to that is short.
           (let* ((attributes (file-attributes file))
                  (page (and (equal (file-name-extension file) "html") (serve-project--vendored-p)))
+                 ;; A proxy that sends files gets the name of this one
+                 ;; (and sends parts, compressed copies and "not changed"
+                 ;; as it does for its own files).  Not a page: that goes
+                 ;; out with this server's word about frames.
+                 (hand-off (and (not (equal (file-name-extension file) "html"))
+                                (serve-project--hand-off file)))
                  ;; A compressed copy is sent in place of the file to a
                  ;; browser that takes one, but not a part of it: the
                  ;; parts that are asked for are parts of the file.
@@ -452,8 +495,15 @@ that name."
                  (headers (append (list (cons "ETag" tag) '("Cache-Control" . "no-cache"))
                                   (and copy '(("Vary" . "Accept-Encoding")))
                                   (and packed '(("Content-Encoding" . "gzip"))))))
-            (if (equal (cdr (assoc "if-none-match" request-headers)) tag)
-                (serve-project--respond process "304 Not Modified" nil "" headers)
+            (cond
+             (hand-off
+              (serve-project--respond
+               process "200 OK"
+               (or (cdr (assoc (file-name-extension file) serve-project--types)) "application/octet-stream")
+               "" (list (cons "X-Accel-Redirect" hand-off) '("Cache-Control" . "no-cache"))))
+             ((equal (cdr (assoc "if-none-match" request-headers)) tag)
+              (serve-project--respond process "304 Not Modified" nil "" headers))
+             (t
               (let* ((type (or (cdr (assoc (file-name-extension file) serve-project--types))
                                "application/octet-stream"))
                      (size (file-attribute-size attributes))
@@ -482,7 +532,7 @@ that name."
                      (if page
                          (encode-coding-string (serve-project--page (decode-coding-string bytes 'utf-8)) 'utf-8)
                        bytes))
-                   headers))))))))))))
+                   headers)))))))))))))
 
 (defun serve-project--begin (process request headers body &optional upload)
   "Answer the REQUEST (METHOD TARGET VERSION) that PROCESS has sent completely."

@@ -12,8 +12,14 @@ After=network.target
 User=app
 WorkingDirectory=/srv/app
 Environment=PUBLIC_ORIGIN=https://example.com
-# Several cores (and the proxy's list of upstreams to match):
-# Environment=WORKERS=4
+# Four Emacs processes, on 8018 to 8021 (the proxy's list of upstreams
+# matches): one Emacs uses one core and does one thing at a time.  They
+# share .data/; what server.el keeps in a Lisp variable is known to one of
+# them only.  WORKERS=1 for an application that needs that.
+Environment=WORKERS=4
+# The proxy sends the larger files (Caddyfile and nginx.conf here are
+# written for it); Emacs only says which.  Not with another proxy.
+Environment=PROXY_SENDS_FILES=yes
 ExecStart=/srv/app/run.sh 8018
 Restart=always
 RestartSec=1

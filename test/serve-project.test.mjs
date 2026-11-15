@@ -727,6 +727,91 @@ test("signing in: sessions that last, a limit on guesses, old hashes renewed, a 
   }
 });
 
+test("with a proxy that sends files, the server says which file and the proxy sends it", async () => {
+  // Emacs sends one large answer at a time and waits for each visitor.
+  // With PROXY_SENDS_FILES it only decides (the same checks as ever) and
+  // names the file in an X-Accel-Redirect header; nginx and Caddy, with the
+  // shipped configurations, send it.
+  const directory = await mkdtemp(join(tmpdir(), "elisp-studio-handoff-"));
+  const outside = await mkdtemp(join(tmpdir(), "elisp-studio-elsewhere-"));
+  await cp(join(root, "template"), directory, { recursive: true });
+  const big = Buffer.alloc(100_000, "a file of more than one write\n");
+  await writeFile(join(directory, "big.bin"), big);
+  await writeFile(join(directory, "a b ü.txt"), big);
+  await writeFile(join(directory, "small.txt"), "small");
+  await writeFile(join(directory, "long.html"), `<p>${"x".repeat(40000)}</p>`);
+  await mkdir(join(directory, "sub"));
+  await writeFile(join(directory, "sub/data.json"), JSON.stringify({ text: "y".repeat(40000) }));
+  await mkdir(join(directory, ".data"));
+  await writeFile(join(directory, ".data/kept.bin"), big);
+  await writeFile(join(outside, "elsewhere.bin"), big);
+  await writeFile(join(directory, "server.el"), `;;; -*- lexical-binding: t; -*-
+(defun app-server-handle (method path _body)
+  (pcase (list method path)
+    ('("GET" "/api/kept") (app-server-send-file (expand-file-name "kept.bin" app-server-data-directory) :name "kept.bin" :type "image/png"))
+    ('("GET" "/api/elsewhere") (app-server-send-file ${JSON.stringify(join(outside, "elsewhere.bin"))}))
+    ('("GET" "/api/members-only") (app-server-refuse "Sign in first" 401))
+    (_ (signal 'file-missing (list "No such API" path)))))
+`);
+  const ask = async (server, path, headers = {}, method = "GET") => {
+    const response = await fetch(`${server.origin}${path}`, { method, headers });
+    return { status: response.status, name: response.headers.get("x-accel-redirect"), type: response.headers.get("content-type"),
+             cache: response.headers.get("cache-control"), tag: response.headers.get("etag"), frames: response.headers.get("x-frame-options"),
+             save: response.headers.get("content-disposition"), body: Buffer.from(await response.arrayBuffer()) };
+  };
+  let server = await startServer(directory, { PUBLIC_ORIGIN: "https://app.example", PROXY_SENDS_FILES: "yes" });
+  try {
+    // A larger file of the project: its name, and nothing of it.
+    const named = await ask(server, "/big.bin");
+    assert.deepEqual([named.status, named.name, named.type, named.cache, named.tag, named.body.length],
+      [200, "/.files/big.bin", "application/octet-stream", "no-cache", null, 0]);
+    assert.equal((await ask(server, "/a%20b%20%C3%BC.txt")).name, "/.files/a%20b%20%C3%BC.txt");
+    assert.equal((await ask(server, "/sub/data.json")).name, "/.files/sub/data.json");
+    // Parts, "not changed" and HEAD are the proxy's to answer.
+    assert.equal((await ask(server, "/big.bin", { Range: "bytes=0-9" })).name, "/.files/big.bin");
+    assert.equal((await ask(server, "/big.bin", { "If-None-Match": '"anything"' })).name, "/.files/big.bin");
+    assert.equal((await ask(server, "/big.bin", {}, "HEAD")).name, "/.files/big.bin");
+    // A small file is one write, and a page goes out with this server's
+    // word about frames: both are sent here.
+    const small = await ask(server, "/small.txt");
+    assert.deepEqual([small.name, small.body.toString(), small.tag !== null], [null, "small", true]);
+    const page = await ask(server, "/long.html");
+    assert.deepEqual([page.name, page.frames, page.body.length], [null, "SAMEORIGIN", 40007]);
+    // What is not served is not named either; the proxy's own name for
+    // the files is one of those.
+    for (const path of ["/server.el", "/.data/kept.bin", "/.files/big.bin", "/.files/server.el", "/big.bin/", "/missing.bin"]) {
+      const refused = await ask(server, path);
+      assert.deepEqual([refused.status, refused.name], [404, null], path);
+    }
+    // A file that server.el answers with, after server.el decided that
+    // this visitor gets it.
+    const kept = await ask(server, "/api/kept");
+    assert.deepEqual([kept.status, kept.name, kept.type, kept.cache, kept.save, kept.body.length],
+      [200, "/.files/.data/kept.bin", "image/png", "no-store", 'attachment; filename="kept.bin"', 0]);
+    const refusal = await ask(server, "/api/members-only");
+    assert.deepEqual([refusal.status, refusal.name], [401, null]);
+    // A file outside the application's directory is not the proxy's.
+    const elsewhere = await ask(server, "/api/elsewhere");
+    assert.deepEqual([elsewhere.status, elsewhere.name, elsewhere.body.equals(big)], [200, null, true]);
+    await server.stop();
+
+    // Without a proxy there is nobody to send it, whatever the variable says.
+    server = await startServer(directory, { PROXY_SENDS_FILES: "yes" });
+    const alone = await ask(server, "/big.bin");
+    assert.deepEqual([alone.name, alone.body.equals(big)], [null, true]);
+    await server.stop();
+    // And with a proxy that was not told to, the server sends as before.
+    server = await startServer(directory, { PUBLIC_ORIGIN: "https://app.example" });
+    const asBefore = await ask(server, "/big.bin");
+    assert.deepEqual([asBefore.name, asBefore.body.equals(big), asBefore.tag !== null], [null, true, true]);
+    assert.equal((await ask(server, "/api/kept")).body.equals(big), true);
+  } finally {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
 test("visitors who hang up in the middle of an answer, or do not read it, do not end or keep the server", async () => {
   // Writing to a connection that the other side has closed raises SIGPIPE,
   // which ends an Emacs in batch mode unless the script that started it
