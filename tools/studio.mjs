@@ -8,6 +8,9 @@
 //                                        window shows the application and
 //                                        follows every save
 //
+//   --native-server  with DIRECTORY: server.el runs in a native Emacs
+//                  (tools/serve-project.sh), as it will on a server, instead
+//                  of a third Emacs in the window; /api/ goes to it
 //   --kiosk        the whole screen, nothing of Chrome around it
 //   --port N       the port of the server (5190)
 //   --no-browser   start the server only and say where it is
@@ -74,7 +77,7 @@ export function chromeArguments(url, profile, { kiosk = false } = {}) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (flag("--help") || flag("-h")) {
-    console.log("usage: node tools/studio.mjs [DIRECTORY] [--kiosk] [--port N] [--no-browser] [--print] [--update]");
+    console.log("usage: node tools/studio.mjs [DIRECTORY] [--native-server] [--kiosk] [--port N] [--no-browser] [--print] [--update]");
     process.exit(0);
   }
   if (flag("--update")) rmSync(join(cacheDirectory, "sites"), { recursive: true, force: true });
@@ -97,7 +100,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.log(JSON.stringify({ page, project, chrome, arguments: chromeArguments(page, profile, { kiosk: flag("--kiosk") }) }, null, 2));
     process.exit(0);
   }
-  await serve({ port, project });
+  await serve({ port, project, nativeServer: Boolean(project) && flag("--native-server") });
   console.log(`the studio: ${page}`);
   if (project) {
     // For an editor to find the studio that follows this directory.

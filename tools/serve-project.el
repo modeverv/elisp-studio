@@ -757,6 +757,8 @@ many."
              (not (and (fboundp 'sqlite-available-p) (sqlite-available-p))))
     (message "serve-project: WARNING: this Emacs has no SQLite, so each of the %d workers keeps its own sessions: a visitor signed in at one is unknown to the others"
              serve-project-workers))
+  ;; server.el may load the project's other files, as the page does.
+  (app-server-use-project serve-project-directory)
   (let ((server (expand-file-name "server.el" serve-project-directory))
         (compiled (expand-file-name "server.elc" app-server-data-directory)))
     (when (file-readable-p server)
@@ -767,7 +769,11 @@ many."
                 (byte-compile-verbose nil))
             (ignore-errors (byte-compile-file server)))
           (load compiled nil t)
-        (load server nil t))))
+        (load server nil t))
+      ;; For the studio, which starts this server again when one changes.
+      (let ((loaded (delete "server.el" (app-server-project-files))))
+        (when loaded
+          (message "serve-project: server.el loaded %s" (string-join loaded ", "))))))
   (serve-project--compile)
   (setq serve-project--process
         ;; The number is the length of the queue of connections that wait to

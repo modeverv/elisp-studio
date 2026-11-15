@@ -83,6 +83,10 @@ The definition at point goes to the application as text and is evaluated there (
 - In the studio, a third eval service worker. The studio gives the application a `fetch` (elisp-react's `start({ fetch })`) that hands requests for `/api/...` to `app-server-respond` and builds the `Response`; everything else goes to the network. The server's data directory is in that Emacs's memory. After each request the studio asks for a signature of its files (names, sizes, times); when it changed, it takes the files (`app-server--dump`, base64) and puts them into IndexedDB; a new server gets them back before `server.el` is loaded (`app-server--restore`). A request that does not return within eight seconds ends that Emacs and starts another.
 - `tools/serve-project.el`, a small HTTP server in Emacs Lisp for a native Emacs: files from the project directory, `/api/...` through `app-server-respond`, data in `.data/`.
 
+In both, `app-server-use-project` names the project's directory (`app-server-project-directory`) and appends it to `load-path`, so `server.el` loads the project's other files the same way in both. The tab's Emacs has no project of its own: the studio writes the project's text files (all but `server.el`, which it evaluates) to `/project/` there before `server.el` is evaluated, and after a change writes those that changed (`app-server-tab-files`), which loads again any that `load-history` says were loaded. A native server reports the project files it loaded (`serve-project: server.el loaded ...`).
+
+With `tools/studio.mjs DIRECTORY --native-server` the project's `server.el` runs in a native Emacs instead: `tools/local-project.mjs` starts `tools/serve-project.sh` on a free port with the studio's own origins as `PUBLIC_ORIGIN`, so that the studio's server is the reverse proxy in front of it, and passes the page's `/api/` there as it is (headers, cookies, body). The page, told so with the files, sends the application's `/api/` requests to its own origin instead of a tab Emacs. The native server is started again when `server.el` or a file that it reported loading changes; its start, new start or end goes to the page as a `server` event, which the status line shows.
+
 ### Answering later
 
 `app-server-handle` may return the value of `app-server-defer`. `app-server-respond` then calls the deferred function with `respond` and `fail`, returns nil instead of `[STATUS TEXT]`, and delivers the answer to the function its caller passed (`later`) when one of the two is called; the first call counts. `app-server--guard` wraps every function that runs later so that an error fails the request it belongs to.
@@ -156,7 +160,7 @@ The window is Chrome with `--app` and a profile of its own. Sibling sites withou
 ## What is not there yet
 
 - More than one project, and a way to start a new one from the page.
-- For a project in a directory: `server.el` in a native Emacs next to the window (it runs in the tab), and the page's Emacs and the directory kept in step with each other.
+- For a project in a directory: the page's Emacs and the directory kept in step with each other.
 - File and line for errors that happen while the application runs (they name the component and those above it).
 - A language server for anything but Emacs Lisp: Eglot is there, a server program for wasmacs's process service is not.
 - A button for the whole way to a public URL (create the repository, push, enable Pages).

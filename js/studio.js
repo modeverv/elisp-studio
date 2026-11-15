@@ -180,10 +180,17 @@ function report(status, summary, log = "") {
 // A project with a server.el has a server: a third Emacs in this tab (the
 // eval service again) that runs it on lisp/app-server.el.  The application's
 // requests to /api/... are answered by it instead of the network.  What it
-// keeps (app-server-write, an SQLite database) is saved in IndexedDB.
+// keeps (app-server-write, an SQLite database) is saved in IndexedDB.  It
+// has a copy of the project's text files in /project/, for server.el to
+// load what it shares with the page.
+//
+// A project in a directory may have its server.el run by a native Emacs
+// instead (tools/studio.mjs DIR --native-server): then /api/ goes to it.
 
-let server = null;            // { emacs, source, signature } | null
+let server = null;            // { emacs, source, copies, signature, deferred } | null
 let serverLibrary = null;
+let nativeServer = false;
+const SERVER_PROJECT = "/project/";
 
 // The server's data directory, kept in IndexedDB (it may hold an SQLite
 // database): [[file name, base64 of its bytes], ...].
@@ -203,16 +210,29 @@ function studioStore(mode, action) {
 const loadServerData = () => studioStore("readonly", (store) => store.get(SERVER_DATA_KEY)).then((data) => data || [], () => []);
 const saveServerData = (data) => studioStore("readwrite", (store) => store.put(data, SERVER_DATA_KEY)).catch(() => {});
 
-async function startServer(source) {
+async function startServer(source, project) {
   stopServer();
   const { createEmacsEvalService } = await import(new URL("app/src/emacs-eval-client.js", WASMACS).href);
   serverLibrary ??= await (await fetch(new URL("lisp/app-server.el", here), { cache: "no-store" })).text();
   const emacs = createEmacsEvalService({ onOutput: (text) => console.log(`[server] ${text.trimEnd()}`) });
   await withTimeout(emacs.ready, FIRST_START_TIMEOUT_MS, "the server's Emacs");
-  await emacs.eval(`${serverLibrary}\n(app-server-use-tab-host)\nnil`);
+  await emacs.eval(`${serverLibrary}\n(app-server-use-tab-host)\n(app-server-use-project ${lispString(SERVER_PROJECT)})\nnil`);
   await emacs.call("app-server--restore", await loadServerData());
-  server = { emacs, source: null, signature: await emacs.call("app-server--signature"), deferred: new Map() };
+  server = { emacs, source: null, copies: new Map(), signature: await emacs.call("app-server--signature"), deferred: new Map() };
+  await copyToServer(project);
   await loadServer(source);
+}
+
+// Bring the server's copy of the project's text files (all but server.el,
+// which is evaluated) in line with PROJECT.  Returns the files it loaded
+// again, having loaded them before.
+async function copyToServer(project) {
+  const next = new Map([...project].filter(([path, content]) => typeof content === "string" && path !== SERVER_FILE));
+  const changed = [...next].filter(([path, text]) => server.copies.get(path) !== text);
+  const removed = [...server.copies.keys()].filter((path) => !next.has(path));
+  server.copies = next;
+  if (!changed.length && !removed.length) return [];
+  return withTimeout(server.emacs.call("app-server-tab-files", changed, removed), SERVER_TIMEOUT_MS, "the server");
 }
 
 function stopServer() {
@@ -230,18 +250,21 @@ async function loadServer(source) {
 // status, or null when nothing changed.
 async function syncServer(project) {
   const source = project.get(SERVER_FILE);
-  if (source === undefined) {
+  if (source === undefined || nativeServer) {
     if (!server) return null;
     stopServer();
-    return "server.el is gone: the server stopped";
+    return nativeServer ? null : "server.el is gone: the server stopped";
   }
-  if (server && server.source === source) return null;
   try {
     if (server) {
-      await loadServer(source);
-      return `server.el updated at ${clock()}: the server keeps its data`;
+      const again = await copyToServer(project);
+      if (server.source !== source) {
+        await loadServer(source);
+        return `server.el updated at ${clock()}: the server keeps its data`;
+      }
+      return again.length ? `${again.join(", ")} loaded again in the server at ${clock()}` : null;
     }
-    await startServer(source);
+    await startServer(source, project);
     return "the server runs";
   } catch (error) {
     if (/did not answer/.test(error.message)) stopServer();
@@ -363,6 +386,8 @@ async function applicationFetch(url, options = {}) {
     }
     return new Response(file ? Uint8Array.from(atob(file.base64), (c) => c.charCodeAt(0)) : value, { status, headers: response });
   };
+  // A native Emacs: the request goes there as it is, cookies and all.
+  if (nativeServer) return fetch(new URL(target.pathname + target.search, location.origin), options);
   if (!server) return lisp(404, '"This application has no server.el"');
   try {
     const current = server;
@@ -395,7 +420,7 @@ async function applicationFetch(url, options = {}) {
       const source = server?.source;
       stopServer();
       report("error", "the server did not answer and was started again");
-      if (source !== null && source !== undefined) startServer(source).catch(() => {});
+      if (source !== null && source !== undefined) startServer(source, files).catch(() => {});
       return lisp(504, '"The server did not answer"');
     }
     return lisp(500, JSON.stringify(error.message));
@@ -628,7 +653,9 @@ async function applyProject(next) {
     if (!first) return;
   }
   if (first) return startPreview(next, "project loaded");
-  const serverOnly = changed.every((path) => path === SERVER_FILE);
+  // Changed: server.el, or files that only the server uses.
+  const forPage = (path) => path === "index.html" || preview.sources.has(path) || preview.styles.has(path);
+  const serverOnly = changed.every((path) => path === SERVER_FILE || (preview?.app && !forPage(path)));
   if (serverNews && serverOnly) {
     showError("");
     return report("ok", serverNews);
@@ -716,7 +743,8 @@ async function applyProject(next) {
   if (done.length) {
     showError("");
     report(removed && /still use/.test(removed) ? "error" : "ok",
-           `${done.join(", ")} updated at ${clock()}: no reload, state kept${removed ? `; ${removed}` : ""}`, logs.join("\n\n"));
+           `${done.join(", ")} updated at ${clock()}: no reload, state kept${removed ? `; ${removed}` : ""}${serverNews ? `; ${serverNews}` : ""}`,
+           logs.join("\n\n"));
   }
 }
 
@@ -869,8 +897,9 @@ function listenToDirectory() {
   setStatus("waiting for the project's files…");
   const events = new EventSource("/__project/events");
   events.addEventListener("files", (event) => {
-    const { directory, files: given } = JSON.parse(event.data);
+    const { directory, files: given, server: native } = JSON.parse(event.data);
     PROJECT = directory;
+    nativeServer = Boolean(native);
     document.querySelector("#project").textContent = directory;
     document.title = `${directory.split("/").filter(Boolean).pop()} · elisp-studio`;
     const next = new Map(Object.entries(given));
@@ -889,6 +918,15 @@ function listenToDirectory() {
   events.addEventListener("eval", (event) => {
     const { file, text } = JSON.parse(event.data);
     queue = queue.then(() => evalInApplication(file, text)).catch(() => {});
+  });
+  // The native Emacs of server.el (--native-server): started, started
+  // again after a change, or failed.
+  events.addEventListener("server", (event) => {
+    const { status, summary, log } = JSON.parse(event.data);
+    queue = queue.then(() => {
+      if (status === "error") showError(log || summary);
+      report(status, summary, log || "");
+    });
   });
   events.onerror = () => setStatus("the studio's server does not answer (tools/studio.mjs); waiting for it…", "error");
 }

@@ -65,13 +65,15 @@ function published(sites, cache, prefix, relative) {
  *   plain     no cross-origin isolation headers (default: with a project,
  *             since then the page has no editor that needs them)
  *   project   a directory: the studio's page is told about its files
+ *   nativeServer  with a project: its server.el runs in a native Emacs,
+ *             which answers the application's /api/ (local-project.mjs)
  *   sites     where the sibling sites are published, for those without a
  *             checkout here; cache: where their files are kept
  */
-export async function serve({ port = 0, plain = undefined, project = null,
+export async function serve({ port = 0, plain = undefined, project = null, nativeServer = false,
                               sites = process.env.PUBLIC_SITES || "https://modeverv.github.io/",
                               cache = join(cacheDirectory, "sites") } = {}) {
-  const local = project ? localProject(project) : null;
+  const local = project ? localProject(project, { nativeServer }) : null;
   // Isolation is for the editor's SharedArrayBuffer.  A project in a
   // directory has no editor in the page, and an isolated preview would
   // refuse third-party frames (a YouTube player) that do not opt in.
@@ -86,6 +88,10 @@ export async function serve({ port = 0, plain = undefined, project = null,
     if (path.startsWith("/__project/")) {
       if (local) local.handle(request, response, url);
       else response.writeHead(404).end("no project");
+      return;
+    }
+    if (nativeServer && local && path.startsWith("/api/")) {
+      local.proxy(request, response);
       return;
     }
     const prefix = Object.keys(mounts).find((candidate) => path.startsWith(candidate));
@@ -131,6 +137,7 @@ export async function serve({ port = 0, plain = undefined, project = null,
   // to the project keeps its connection.)
   const close = server.close.bind(server);
   server.close = (done) => { local?.close(); server.closeAllConnections?.(); return close(done); };
+  await local?.useNativeServer(server.address().port);
   return { server, origin: `http://127.0.0.1:${server.address().port}`, project: local };
 }
 
