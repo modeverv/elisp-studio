@@ -431,6 +431,78 @@ anything itself."
   '((200 . "OK") (400 . "Bad Request") (401 . "Unauthorized") (403 . "Forbidden") (404 . "Not Found")
     (409 . "Conflict") (429 . "Too Many Requests") (500 . "Internal Server Error") (504 . "Gateway Timeout")))
 
+(defun serve-project--escape (text)
+  "TEXT for HTML: text or an attribute value."
+  (replace-regexp-in-string
+   "[&<>\"']" (lambda (c) (cdr (assoc c '(("&" . "&amp;") ("<" . "&lt;") (">" . "&gt;") ("\"" . "&quot;") ("'" . "&#39;")))))
+   text t t))
+
+(defun serve-project--before-head-end (html element)
+  "HTML with ELEMENT put at the end of its head."
+  (let ((case-fold-search t))
+    (if (string-match "[ \t]*</head>" html)
+        (replace-match (concat "    " element "\n" (match-string 0 html)) t t html)
+      html)))
+
+(defun serve-project--fill-app (html inner)
+  "HTML with INNER as the content of its element with id \"app\"."
+  (let ((case-fold-search t))
+    (if (not (string-match "<\\([a-z][a-z0-9-]*\\)[^>]*?[ \t\n]id=[\"']app[\"'][^>]*>" html))
+        html
+      (let* ((pattern (format "<\\(/\\)?%s[ \t\n/>]" (regexp-quote (match-string 1 html))))
+             (start (match-end 0))
+             (at start)
+             (depth 1)
+             (end nil))
+        (while (and (not end) (string-match pattern html at))
+          (setq depth (if (match-beginning 1) (1- depth) (1+ depth))
+                at (match-end 0))
+          (when (= depth 0) (setq end (match-beginning 0))))
+        (if end (concat (substring html 0 start) inner (substring html end)) html)))))
+
+(defun serve-project--fill-page (html page)
+  "HTML with what PAGE (see `app-server-page-function') says put in."
+  (let ((case-fold-search t)
+        (title (plist-get page :title)))
+    (when title
+      (let ((element (format "<title>%s</title>" (serve-project--escape title))))
+        (setq html (if (string-match "<title[^>]*>[^<]*</title>" html)
+                       (replace-match element t t html)
+                     (serve-project--before-head-end html element)))))
+    (dolist (entry (plist-get page :meta))
+      (let* ((name (car entry))
+             (element (format "<meta %s=\"%s\" content=\"%s\">"
+                              (if (string-match-p "\\`\\(?:og\\|article\\|profile\\|video\\|music\\|book\\):" name) "property" "name")
+                              (serve-project--escape name) (serve-project--escape (cdr entry)))))
+        (setq html (if (string-match (format "<meta[^>]*[ \t\n]\\(?:name\\|property\\)=[\"']%s[\"'][^>]*>" (regexp-quote name)) html)
+                       (replace-match element t t html)
+                     (serve-project--before-head-end html element)))))
+    (when (plist-get page :html)
+      (setq html (serve-project--fill-app html (plist-get page :html))))
+    html))
+
+(defun serve-project--page-for (path)
+  "What `app-server-page-function' says of PATH; nil if it errs (logged)."
+  (and app-server-page-function
+       (condition-case err
+           (funcall app-server-page-function path)
+         (error (message "serve-project: app-server-page-function at %s: %s" path (error-message-string err))
+                nil))))
+
+(defun serve-project--send-page (process path page)
+  "Send index.html filled in with PAGE, for PATH."
+  (let ((html (with-temp-buffer
+                (let ((coding-system-for-read 'utf-8))
+                  (insert-file-contents (expand-file-name "index.html" serve-project--root)))
+                (buffer-string)))
+        (status (or (plist-get page :status) 200)))
+    (when (serve-project--vendored-p) (setq html (serve-project--page html)))
+    (serve-project--respond
+     process (format "%d %s" status (or (cdr (assq status serve-project--reasons)) "Error"))
+     "text/html; charset=utf-8"
+     (encode-coding-string (serve-project--fill-page html page) 'utf-8)
+     (serve-project--merge-headers '(("Cache-Control" . "no-cache")) (serve-project--file-headers path)))))
+
 (defun serve-project--answer (process status text headers &optional close)
   "Send the answer of server.el: STATUS, TEXT (printed Lisp data), HEADERS.
 TEXT is (:file FILE :type TYPE :name NAME) when the answer is a file."
@@ -550,9 +622,17 @@ A page of `serve-project-cors-origins' is not."
      ((not (member method '("GET" "HEAD")))
       (serve-project--respond process "405 Method Not Allowed" "text/plain" "method not allowed"))
      (t
-      (let ((file (serve-project--file path)))
-        (if (not file)
-            (serve-project--respond process "404 Not Found" "text/plain" "not found")
+      (let* ((file (serve-project--file path))
+             ;; The page, or a path that is no file: server.el may fill
+             ;; the page in for it (a route of the application).
+             (filled (and (or (not file) (equal file (expand-file-name "index.html" serve-project--root)))
+                          (file-regular-p (expand-file-name "index.html" serve-project--root))
+                          (serve-project--page-for path))))
+        (cond
+         (filled (serve-project--send-page process path filled))
+         ((not file)
+            (serve-project--respond process "404 Not Found" "text/plain" "not found"))
+         (t
           ;; The browser may keep the file but asks each time whether it
           ;; changed; the answer to that is short.
           (let* ((attributes (file-attributes file))
@@ -618,7 +698,7 @@ A page of `serve-project-cors-origins' is not."
                      (if page
                          (encode-coding-string (serve-project--page (decode-coding-string bytes 'utf-8)) 'utf-8)
                        bytes))
-                   headers)))))))))))))
+                   headers))))))))))))))
 
 (defun serve-project--begin (process request headers body &optional upload)
   "Answer the REQUEST (METHOD TARGET VERSION) that PROCESS has sent completely."
@@ -845,6 +925,10 @@ many."
              serve-project-workers))
   ;; server.el may load the project's other files, as the page does.
   (app-server-use-project serve-project-directory)
+  ;; And react.el, to render pages (`app-server-page-function'), when
+  ;; ./fetch-emacs.sh has put elisp-react into vendor/.
+  (let ((react (expand-file-name "vendor/elisp-react/lisp" serve-project-directory)))
+    (when (file-directory-p react) (add-to-list 'load-path react t)))
   (let ((server (expand-file-name "server.el" serve-project-directory))
         (compiled (expand-file-name "server.elc" app-server-data-directory)))
     (when (file-readable-p server)

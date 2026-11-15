@@ -257,6 +257,26 @@ scrypt を計算できるのは `python3` だけで、それも `hashlib` が sc
 
 bcrypt や Argon2 を使っていない理由：Python の標準ライブラリにもブラウザにもなく、探した範囲では Emacs Lisp で書かれたものも見つかりませんでした。見つかったのは、[kaesar-pbkdf2.el](https://github.com/mhayashi1120/Emacs-kaesar)（Lisp で書かれた PBKDF2、GPL）、[pg-el](https://github.com/emarsden/pg-el) の中の PBKDF2（GnuTLS 経由、PostgreSQL の SCRAM 認証用）、そしてモジュールとしてコンパイルが必要な libsodium のバインディング2つ（`crypto_box` だけを公開している [sodium.el](https://github.com/dakra/sodium.el) と、Rust で書かれた [esodium](https://codeberg.org/coopi/emacs-esodium)）です。数文字のパスワードは、どの方式でも弱いままです。
 
+### アプリケーションのルートごとのページ
+
+ページはどのアドレスでも `index.html` なので、`/watch/42` へのリンクを共有しても、どこでも同じタイトルと説明が表示され、クローラーには「Loading Emacs…」しか見えません。ネイティブの Emacs では、`server.el` がページに内容を入れられます。`app-server-page-function` は、サーバーが `index.html` を送るときと、`GET` がどのファイルも指していないとき（アプリケーションのルート）に、パスを引数として呼ばれます。nil（ページはそのまま。ファイルでないパスなら 404）か、入れる内容を返します。
+
+```elisp
+(require 'react)     ; ./fetch-emacs.sh が elisp-react を vendor/ に入れると load-path にある
+(setq app-server-page-function
+      (lambda (path)
+        (when (string-match "\\`/watch/\\([0-9]+\\)\\'" path)
+          (let ((video (videos-find (match-string 1 path))))
+            (if (not video)
+                (list :status 404 :title "No such video")
+              (list :title (plist-get video :title)
+                    :meta `(("description" . ,(plist-get video :summary))
+                            ("og:title" . ,(plist-get video :title)))
+                    :html (react-render-to-string (jsx (Video (:video video))))))))))
+```
+
+`:title` はページの `<title>` を置き換えます。`:meta` の各要素は、同じ名前の `<meta>` を置き換えるか、なければ追加します（`og:...` は `property=` で書きます）。どちらもエスケープされます。`:html` は `id="app"` の要素の中身になります（HTML としてそのまま入ります）。アプリケーションは、自分の Emacs が起動したらその上にマウントします（ハイドレーションはありません。最初の描画で置き換わります）。関数の中のエラーはログに出て、ページはそのまま送られます。studio の中では、ページは `index.html` のままです。
+
 ### 公開する
 
 サーバーは 127.0.0.1 で待ち受け、暗号化しない HTTP を話します。アプリケーションをインターネットに出すときは、同じマシンでリバースプロキシを手前に置きます。HTTPS、HTTP/2、圧縮は Caddy か nginx が担当し、残りを Emacs が担当します（`vendor/` に置いたブラウザ用の Emacs は、圧縮済みのものを Emacs が送ります。「プロジェクトを取り出す」を参照）。サーバーには、公開されるアドレスを伝えます。

@@ -138,6 +138,81 @@ test("CORS_ORIGINS: pages of the named sites use /api/, without cookies unless C
   await rm(directory, { recursive: true, force: true });
 });
 
+test("app-server-page-function fills index.html in for the page and the application's routes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "serve-project-pages-"));
+  await cp(join(root, "template"), directory, { recursive: true });
+  await writeFile(join(directory, "index.html"), `<!doctype html>
+<html>
+  <head>
+    <title>My app</title>
+    <meta name="description" content="Everything">
+  </head>
+  <body>
+    <div id="app"><div class="boot">Loading Emacs…</div></div>
+    <footer><div>after</div></footer>
+  </body>
+</html>
+`);
+  // react.el where ./fetch-emacs.sh puts it: this checkout's sibling, or
+  // the published one.
+  const sibling = join(root, "../elisp-react/lisp/react.el");
+  await mkdir(join(directory, "vendor/elisp-react/lisp"), { recursive: true });
+  await writeFile(join(directory, "vendor/elisp-react/lisp/react.el"), existsSync(sibling)
+    ? await readFile(sibling, "utf8")
+    : await (await fetch("https://modeverv.github.io/elisp-react/lisp/react.el")).text());
+  await writeFile(join(directory, "server.el"), `;;; -*- lexical-binding: t; -*-
+(require 'react)
+(react-define-component 'Video
+  :render (lambda (self) (jsx (p (:class "video") (format "Video %s & more" (react-props self :id))))))
+(setq app-server-page-function
+      (lambda (path)
+        (cond
+         ((equal path "/")
+          (list :title "Home <1>" :meta '(("description" . "The \\"home\\" page") ("og:title" . "Home"))))
+         ((string-match "\\\\\`/watch/\\\\([0-9]+\\\\)\\\\'" path)
+          (let ((id (match-string 1 path)))
+            (list :title (format "Video %s" id)
+                  :html (react-render-to-string (jsx (Video (:id id)))))))
+         ((equal path "/gone") (list :status 404 :title "Not here"))
+         ((equal path "/broken") (car 1)))))
+(defun app-server-handle (_method path _body)
+  (signal 'file-missing (list "No such API" path)))
+`);
+  const server = await startServer(directory);
+  try {
+    const page = async (path) => { const response = await fetch(`${server.origin}${path}`); return [response.status, await response.text(), response.headers]; };
+    // The page itself: title replaced, the description replaced, og: added.
+    const [status, home, headers] = await page("/");
+    assert.equal(status, 200);
+    assert.match(headers.get("content-type"), /^text\/html/);
+    assert.match(home, /<title>Home &lt;1&gt;<\/title>/);
+    assert.match(home, /<meta name="description" content="The &quot;home&quot; page">/);
+    assert.doesNotMatch(home, /Everything/);
+    assert.match(home, /<meta property="og:title" content="Home">\n\s*<\/head>/);
+    assert.match(home, /<div class="boot">Loading Emacs…<\/div>/);
+    // A route: index.html with the component rendered into #app, and the
+    // elements after it as they were.
+    const [watchStatus, watch] = await page("/watch/42");
+    assert.equal(watchStatus, 200);
+    assert.match(watch, /<title>Video 42<\/title>/);
+    assert.match(watch, /<div id="app"><p class="video">Video 42 &amp; more<\/p><\/div>\n\s*<footer><div>after<\/div><\/footer>/);
+    // Its own status; no page for other paths; files as ever.
+    assert.equal((await page("/gone"))[0], 404);
+    assert.match((await page("/gone"))[1], /<title>Not here<\/title>/);
+    assert.equal((await page("/watch/x"))[0], 404);
+    assert.equal((await page("/style.css"))[0], 200);
+    assert.doesNotMatch((await page("/style.css"))[1], /<title>/);
+    // A function that fails: the page as it is, and the server goes on.
+    const [brokenStatus] = await page("/broken");
+    assert.equal(brokenStatus, 404);
+    assert.match(server.log(), /app-server-page-function at \/broken: Wrong type argument/);
+    assert.match((await page("/index.html"))[1], /<title>My app<\/title>/);
+  } finally {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("the template project runs under a native Emacs: files, server.el, kept data", async () => {
   const directory = await mkdtemp(join(tmpdir(), "elisp-studio-project-"));
   await cp(join(root, "template"), directory, { recursive: true });

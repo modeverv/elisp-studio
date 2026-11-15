@@ -257,6 +257,26 @@ Only `python3` computes scrypt, and only one whose `hashlib` has it (the one mac
 
 Why not bcrypt or Argon2: Python's standard library has neither, the browser neither, and a search turned up none written in Emacs Lisp. What there is: [kaesar-pbkdf2.el](https://github.com/mhayashi1120/Emacs-kaesar) (PBKDF2 in Lisp, GPL), a PBKDF2 inside [pg-el](https://github.com/emarsden/pg-el) (through GnuTLS, for PostgreSQL's SCRAM), and two bindings to libsodium that have to be compiled as modules ([sodium.el](https://github.com/dakra/sodium.el), which exposes `crypto_box` only, and [esodium](https://codeberg.org/coopi/emacs-esodium), in Rust). A password of a few characters stays weak under any of them.
 
+### Pages for the application's routes
+
+The page is `index.html` for every address, so a link to `/watch/42` shows the same title and description everywhere it is shared, and nothing but "Loading Emacs…" to a crawler. Under a native Emacs, `server.el` can fill the page in: `app-server-page-function` is called with the path when the server sends `index.html`, and when a `GET` names no file (a route of the application). It returns nil (the page as it is; 404 for a path that is no file) or what to put in:
+
+```elisp
+(require 'react)     ; on load-path once ./fetch-emacs.sh has put elisp-react into vendor/
+(setq app-server-page-function
+      (lambda (path)
+        (when (string-match "\\`/watch/\\([0-9]+\\)\\'" path)
+          (let ((video (videos-find (match-string 1 path))))
+            (if (not video)
+                (list :status 404 :title "No such video")
+              (list :title (plist-get video :title)
+                    :meta `(("description" . ,(plist-get video :summary))
+                            ("og:title" . ,(plist-get video :title)))
+                    :html (react-render-to-string (jsx (Video (:video video))))))))))
+```
+
+`:title` replaces the page's `<title>`, each of `:meta` replaces the `<meta>` of that name or is added (`og:...` as `property=`), both escaped; `:html` becomes the content of the element with `id="app"`, as HTML, which the application mounts over when its Emacs has started (there is no hydration: the first render replaces it). An error in the function is logged and the page goes out as it is. In the studio the page is `index.html` as it is.
+
 ### Publishing it
 
 The server listens on 127.0.0.1 and speaks plain HTTP. To put the application on the internet, a reverse proxy on the same machine goes in front of it: Caddy or nginx does HTTPS, HTTP/2 and compression, Emacs does the rest (the browser's Emacs in `vendor/` comes from Emacs compressed already, see "Getting the project out"). The server is told the address it is published under:
