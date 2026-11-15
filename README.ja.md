@@ -89,7 +89,8 @@ Emacs でプロジェクトのファイルを開いているときに使える�
 - `(app-server-data body)`：本文を Lisp のデータとして読みます。`read` ではなく、これを使ってください。Emacs のリーダーは、初めて見る名前をすべてシンボルとして保持し続けるので、閲覧者が名前を大量に送るだけでサーバーのメモリを埋められます。`app-server-data` が通すのは、文字列、数値、リスト、ベクタ、そしてこの Emacs がすでに知っているシンボルだけです。閲覧者が送ったものが評価されることはありません。
 - `(app-server-parameter "name")`：リクエストの `?name=...` の値。
 - `(app-server-header "name")`、`(app-server-cookie "name")`：リクエストに付いてきたヘッダーと Cookie。
-- `(app-server-set-header "Name" "value")`、`(app-server-set-cookie "name" "value" :max-age 3600)`、`(app-server-delete-cookie "name")`：応答に付けるもの。Cookie は、指定しないかぎり、ページのスクリプトからは見えず、`SameSite=Lax` で、閲覧者が HTTPS で来た場合は `Secure` になります。
+- `(app-server-set-header "Name" "value")`、`(app-server-set-cookie "name" "value" :max-age 3600)`、`(app-server-delete-cookie "name")`：応答に付けるもの。Cookie は、指定しないかぎり、ページのスクリプトからは見えず、`SameSite=Lax` で、閲覧者が HTTPS で来た場合は `Secure` になります。こうして設定したヘッダーは、ネイティブのサーバーが自分で付ける同じ名前のヘッダーを置き換えます。`/api/` の応答は、ハンドラーが `Cache-Control` を設定しないかぎり `Cache-Control: no-store` です。また、すべての応答に `X-Frame-Options: SAMEORIGIN`、ほかのサイトのフレームに入れないための `Content-Security-Policy`、`Referrer-Policy: strict-origin-when-cross-origin` が付きます。
+- `app-server-file-headers`：ネイティブの Emacs が配信するプロジェクトのファイルに付けるヘッダー。パスに対する正規表現で指定し、サーバーのヘッダー（`Cache-Control: no-cache` と上記のもの）を置き換えます。`` (setq app-server-file-headers '(("\\`/assets/" ("Cache-Control" . "public, max-age=31536000, immutable")))) ``
 - `(app-server-refuse "Sign in first" 401)`：そのメッセージとステータスで断ります。
 - `(app-server-token)`：推測できないランダムな名前。セッションに使います。
 

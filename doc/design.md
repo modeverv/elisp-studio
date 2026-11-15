@@ -130,6 +130,7 @@ Emacs's own waits (`sleep-for`, `accept-process-output`, `url-retrieve-synchrono
 - `serve-project--handle` refuses a `Host` that is not the server's (421) and, for `/api/`, requests that are foreign by `Origin` or by `Sec-Fetch-Site: cross-site`. `X-Forwarded-*` headers are removed before `server.el` sees them unless `PUBLIC_ORIGIN` declares a proxy.
 - `serve-project--accepted` (the server's `:log` function, which Emacs calls for each accepted connection) keeps the number of connections at `serve-project-max-connections` by closing an idle one; the sweep gives connections that never sent anything the request timeout rather than the idle timeout.
 - `app-server-explain-errors` is nil under `serve-project.el`: conditions other than `error`, `user-error` and `app-server-refusal` are logged and answered with a fixed text.
+- The headers of every answer are `serve-project-default-headers`; `serve-project--merge-headers` lets a header of the same name from `server.el` (`app-server-set-header` on `/api/`, `app-server-file-headers` on files) replace a default instead of following it, so that no answer carries two `Cache-Control` or `Referrer-Policy` headers.
 
 ### SQLite
 

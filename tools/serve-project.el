@@ -61,6 +61,33 @@ Pages of these origins may use /api/, besides the pages this server
 serves itself.  From the environment: PUBLIC_ORIGIN=https://example.com
 \(several: separated by commas).")
 
+(defvar serve-project-default-headers
+  '(("X-Content-Type-Options" . "nosniff")
+    ;; Not inside a frame of another site (clickjacking).
+    ("X-Frame-Options" . "SAMEORIGIN")
+    ("Content-Security-Policy" . "frame-ancestors 'self'; form-action 'self'; base-uri 'self'; object-src 'none'")
+    ;; Other sites are told the origin a visitor came from, not the page:
+    ;; what browsers do by default, and what embedded players ask for.
+    ("Referrer-Policy" . "strict-origin-when-cross-origin"))
+  "Headers of every answer.
+A header of the same name that server.el gives replaces one of these:
+`app-server-set-header' for an answer of /api/, `app-server-file-headers'
+for the project's files.")
+
+(defun serve-project--merge-headers (defaults headers)
+  "DEFAULTS without those that HEADERS name (in any case), then HEADERS."
+  (let ((names (mapcar (lambda (header) (downcase (car header))) headers)))
+    (append (seq-remove (lambda (header) (member (downcase (car header)) names)) defaults)
+            headers)))
+
+(defun serve-project--file-headers (path)
+  "The headers that `app-server-file-headers' gives the file at PATH."
+  (let ((headers nil))
+    (dolist (entry app-server-file-headers)
+      (when (string-match-p (car entry) path)
+        (setq headers (serve-project--merge-headers headers (cdr entry)))))
+    headers))
+
 (defvar serve-project-max-body (* 1024 1024)
   "The largest request body that is text for the handler, in bytes.")
 (defvar serve-project-max-upload (* 4 1024 1024 1024)
@@ -208,13 +235,9 @@ is the part of it from byte START up to END."
              (concat (encode-coding-string
                       (concat "HTTP/1.1 " status "\r\n"
                               (and (not bare) (format "Content-Type: %s\r\nContent-Length: %d\r\n" type size))
-                              "X-Content-Type-Options: nosniff\r\n"
-                              ;; Not inside a frame of another site (clickjacking),
-                              ;; and no word to other sites about where one came from.
-                              "X-Frame-Options: SAMEORIGIN\r\n"
-                              "Content-Security-Policy: frame-ancestors 'self'; form-action 'self'; base-uri 'self'; object-src 'none'\r\n"
-                              "Referrer-Policy: same-origin\r\n"
-                              (mapconcat (lambda (header) (concat (car header) ": " (cdr header) "\r\n")) headers "")
+                              (mapconcat (lambda (header) (concat (car header) ": " (cdr header) "\r\n"))
+                                         (serve-project--merge-headers serve-project-default-headers headers)
+                                         "")
                               (if keep "Connection: keep-alive\r\n" "Connection: close\r\n")
                               "\r\n")
                       'utf-8)
@@ -392,9 +415,11 @@ anything itself."
   "Send the answer of server.el: STATUS, TEXT (printed Lisp data), HEADERS.
 TEXT is (:file FILE :type TYPE :name NAME) when the answer is a file."
   (let ((line (format "%d %s" status (or (cdr (assq status serve-project--reasons)) "Error")))
-        ;; Answers of the application are for its own pages to read.
-        (headers (append '(("Cache-Control" . "no-store") ("Cross-Origin-Resource-Policy" . "same-origin"))
-                         headers)))
+        ;; Answers of the application are for its own pages to read, and
+        ;; not kept, unless server.el says otherwise.
+        (headers (serve-project--merge-headers
+                  '(("Cache-Control" . "no-store") ("Cross-Origin-Resource-Policy" . "same-origin"))
+                  headers)))
     (if (stringp text)
         (serve-project--respond process line "application/x-emacs-lisp; charset=utf-8"
                                 (encode-coding-string text 'utf-8) headers close)
@@ -492,7 +517,9 @@ that name."
                  (tag (format "\"%x-%x%s\"" (file-attribute-size attributes)
                               (time-convert (file-attribute-modification-time attributes) 'integer)
                               (cond (page "-v") (packed "-gz") (t ""))))
-                 (headers (append (list (cons "ETag" tag) '("Cache-Control" . "no-cache"))
+                 (headers (append (serve-project--merge-headers
+                                   (list (cons "ETag" tag) '("Cache-Control" . "no-cache"))
+                                   (serve-project--file-headers path))
                                   (and copy '(("Vary" . "Accept-Encoding")))
                                   (and packed '(("Content-Encoding" . "gzip"))))))
             (cond
@@ -500,7 +527,9 @@ that name."
               (serve-project--respond
                process "200 OK"
                (or (cdr (assoc (file-name-extension file) serve-project--types)) "application/octet-stream")
-               "" (list (cons "X-Accel-Redirect" hand-off) '("Cache-Control" . "no-cache"))))
+               "" (cons (cons "X-Accel-Redirect" hand-off)
+                        (serve-project--merge-headers '(("Cache-Control" . "no-cache"))
+                                                      (serve-project--file-headers path)))))
              ((equal (cdr (assoc "if-none-match" request-headers)) tag)
               (serve-project--respond process "304 Not Modified" nil "" headers))
              (t
