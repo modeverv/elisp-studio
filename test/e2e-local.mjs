@@ -204,6 +204,15 @@ try {
   await writeFile(join(project, "lib.el"), ";;; -*- lexical-binding: t; -*-\n(defun order-word-3 () \"three\")\n");
   pass("definitions taken out of a file are taken out of the running application; a file that still uses one is named");
 
+  // Data only (a defconst in words.el): every component renders again.
+  await writeFile(join(project, "words.el"), ";;; -*- lexical-binding: t; -*-\n(defconst words-greeting \"hello\")\n");
+  await writeFile(join(project, "app.el"), ";;; -*- lexical-binding: t; -*-\n(react-define-component 'Greeting :pure t :render (lambda (_self) (jsx (p (:class \"greeting-word\") words-greeting))))\n(react-mount '(Greeting) \"#app\")\n");
+  await edit("index.html", (html) => html.replace('<script type="text/emacs-lisp" src="app.el">', '<script type="text/emacs-lisp" src="words.el"></script>\n<script type="text/emacs-lisp" src="app.el">'));
+  await appUntil("document.querySelector('.greeting-word')?.textContent === 'hello'", "the application starts with words.el");
+  await writeFile(join(project, "words.el"), ";;; -*- lexical-binding: t; -*-\n(defconst words-greeting \"good morning\")\n");
+  await appUntil("document.querySelector('.greeting-word')?.textContent === 'good morning'", "a change of data alone renders again");
+  pass("a change of data alone (a defconst) renders the application again, :pure components too");
+
   // No isolation on this machine: there is no editor in the page.
   assert.deepEqual(await js("[window.crossOriginIsolated, document.querySelector('#preview').contentWindow.crossOriginIsolated]"), [false, false]);
   assert.equal((await fetch(`${origin}/elisp-studio/`)).headers.get("cross-origin-embedder-policy"), null);

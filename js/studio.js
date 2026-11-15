@@ -651,6 +651,20 @@ async function applyProject(next) {
       }
     }
   }
+  // A change of helpers or data (a defconst) redefines no component, so
+  // nothing would render: every component renders again, with its state,
+  // after the application's own functions have had a look
+  // (elisp-studio-after-load-functions, with the files' names).
+  const loadedLisp = sources.filter((path) => done.includes(path));
+  if (loadedLisp.length) {
+    try {
+      await withTimeout(preview.app.run(`(progn
+        (defvar elisp-studio-after-load-functions nil
+          "Functions called with the files a save loaded, before everything renders again.")
+        (run-hook-with-args 'elisp-studio-after-load-functions '(${loadedLisp.map((path) => lispString(path)).join(" ")}))
+        (react-refresh))`), LOAD_TIMEOUT_MS, "the application");
+    } catch (_) { /* an older elisp-react without react-refresh: as before */ }
+  }
   // What the change took out of its files is taken out of the application.
   const loadedSources = sources.filter((path) => done.includes(path) && before.has(path));
   let removed = "";
