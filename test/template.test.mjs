@@ -48,7 +48,8 @@ test("test/run.sh: the template's files compile without a warning and its tests 
     await writeFile(join(directory, "uses.el"), ";;; -*- lexical-binding: t; -*-\n(defun uses () (no-such-function-anywhere))\n");
     const failed = await run(directory);
     assert.notEqual(failed.code, 0);
-    assert.match(failed.output, /uses\.el:2:\d+: Error: the function .no-such-function-anywhere. is not known/);
+    // (Emacs 29 gives the file without the line of a function's warning.)
+    assert.match(failed.output, /uses\.el:(?:2:\d+:)? Error: the function .no-such-function-anywhere. is not known/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
