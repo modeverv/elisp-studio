@@ -129,6 +129,29 @@ try {
   assert.equal(await readFile(join(project, "app.el"), "utf8"), before);
   pass("C-M-x in a native Emacs changes the running application; the file is as it was");
 
+  // The address bar: the preview has no address, elisp-react keeps one in
+  // memory; the studio shows it and moves it, and hash links stay inside.
+  await writeFile(join(project, "app.el"), `;;; -*- lexical-binding: t; -*-
+(react-define-component 'Where
+  :initial-state (lambda (_props) (list :hash (react-location :hash)))
+  :did-mount (lambda (self) (react-location-watch (lambda (location) (react-set-state self :hash (plist-get location :hash)))))
+  :render (lambda (self) (jsx (div (p (:class "where") (react-state self :hash)) (a (:class "about" :href "#/about") "about")))))
+(react-mount '(Where) "#app")
+`);
+  await appUntil("Boolean(document.querySelector('.where'))", "the new app.el is applied");
+  await js("const field = document.querySelector('#address'); field.value = '#/settings'; field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' })); true");
+  await appUntil("document.querySelector('.where').textContent === '#/settings'", "the address bar moves the application");
+  assert.equal(await js("document.querySelector('#address').value"), "/#/settings");
+  await app("document.querySelector('.about').click()");
+  await appUntil("document.querySelector('.where').textContent === '#/about'", "a hash link is followed in the application");
+  assert.equal(await js("document.querySelector('#address').value"), "/#/about");
+  assert.equal(await js("document.querySelector('#preview').contentWindow.location.href"), "about:srcdoc");
+  await js("document.querySelector('#back').click(); true");
+  await appUntil("document.querySelector('.where').textContent === '#/settings'", "Back");
+  await js("document.querySelector('#forward').click(); true");
+  await appUntil("document.querySelector('.where').textContent === '#/about'", "Forward");
+  pass("the address bar shows the application's address and moves it; hash links stay in the preview; Back and Forward work");
+
   // Not a file of a project: the mode stays off, and saving asks nobody.
   const elsewhere = join(workDir, "elsewhere.el");
   await writeFile(elsewhere, "(list)");

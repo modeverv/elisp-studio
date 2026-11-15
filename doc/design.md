@@ -38,7 +38,7 @@ The project's `index.html` is a complete page for a static host: it links `style
 - the Emacs Lisp scripts are taken out and become the `sources` handed to the host's `start`;
 - the host's own `<script>` is replaced by one that imports the host from `../elisp-react/` and hands `start` to the studio, which calls it inside the frame.
 
-The frame is an `srcdoc` iframe: same origin as the studio (it can reach `contentDocument` and `contentWindow`), and it inherits the studio's cross-origin isolation.
+The frame is an `srcdoc` iframe: same origin as the studio (it can reach `contentDocument` and `contentWindow`), and it inherits the studio's cross-origin isolation. Its address is `about:srcdoc` and its base URL the studio's, so `pushState` throws there and a hash link would load the studio into the frame. elisp-react therefore keeps the application's address in memory in such a frame and follows hash links itself; the studio's address bar follows it (`elisp-react:location`) and moves it (`app.location.navigate`, `go`).
 
 ## Starting the editor
 

@@ -67,6 +67,8 @@ While you type, Flymake marks what the byte compiler would complain about: the e
 
 A mistake does not take the application down: if the new code does not load, the error is shown under the application and the old code keeps running. An endless loop does take it down, and only it: the studio starts a new application at the next save, and Emacs keeps editing. The "restart app" button starts the application again from the files.
 
+The application has an address even though the preview is a frame without one: elisp-react keeps it in memory there (`react-location`, `react-navigate`), and the bar above the application shows it. Hash links in the application stay in the preview; type an address and press Enter to go there, or use ← and → for Back and Forward.
+
 ## A server side
 
 A project with a `server.el` has a server. The file defines one function:
