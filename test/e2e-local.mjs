@@ -248,6 +248,40 @@ try {
   await rm(join(project, "check.elc"), { force: true });
   pass("your own Emacs gets react.el from the studio and the project's definitions: no false warnings, components and helpers known");
 
+  // server.el requires a library of the project, as under a native Emacs:
+  // the server's Emacs in the tab has a copy of the project's text files,
+  // and a saved library that it loaded is loaded again.
+  const shared = (word) => `;;; -*- lexical-binding: t; -*-\n(defun shared-greeting () ${JSON.stringify(word)})\n(provide 'shared)\n`;
+  await writeFile(join(project, "shared.el"), shared("one"));
+  await writeFile(join(project, "server.el"), `;;; -*- lexical-binding: t; -*-
+(require 'shared)
+(defun app-server-handle (method path _body)
+  (pcase (list method path)
+    ('("GET" "/api/greeting") (shared-greeting))
+    (_ (signal 'file-missing (list "No such API" path)))))
+`);
+  const greeting = `window.elispStudio.fetch('/api/greeting').then((response) => response.text())`;
+  await until(`${greeting}.then((text) => text === '"one"')`, "server.el requires shared.el");
+  await writeFile(join(project, "shared.el"), shared("two"));
+  await until(`${greeting}.then((text) => text === '"two"')`, "the saved shared.el is loaded again in the server");
+  assert.match(await status(), /shared\.el loaded again in the server/);
+  pass("server.el requires a library of the project in the tab too; a saved one is loaded again in the server");
+
+  // --native-server: the same project's server.el in a native Emacs, as on
+  // a server; the application's /api/ goes there.
+  const native = await serve({ project, nativeServer: true });
+  try {
+    await client.send("Page.navigate", { url: `${native.origin}/elisp-studio/?project=local` }, sessionId);
+    await until(`/native Emacs/.test(document.querySelector('#status').textContent)`, "the studio says where server.el runs");
+    await until(`${greeting}.then((text) => text === '"two"')`, "the native server answers the application");
+    await writeFile(join(project, "shared.el"), shared("three"));
+    await until(`${greeting}.then((text) => text === '"three"')`, "the native server starts again with the saved shared.el");
+    assert.match(await status(), /shared\.el changed: server\.el started again in a native Emacs/);
+    pass("with --native-server the application's /api/ is answered by server.el in a native Emacs, started again when shared.el is saved");
+  } finally {
+    await new Promise((resolve) => native.server.close(resolve));
+  }
+
   // No isolation on this machine: there is no editor in the page.
   assert.deepEqual(await js("[window.crossOriginIsolated, document.querySelector('#preview').contentWindow.crossOriginIsolated]"), [false, false]);
   assert.equal((await fetch(`${origin}/elisp-studio/`)).headers.get("cross-origin-embedder-policy"), null);

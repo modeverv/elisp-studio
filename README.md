@@ -113,6 +113,15 @@ About bundling SQLite: it is in the [public domain](https://www.sqlite.org/copyr
 
 In the studio the server is a third Emacs in the browser tab. The application's requests to `/api/...` never leave the tab: the studio hands them to that Emacs. Saving `server.el` changes the running server.
 
+`server.el` may load the project's other files, code it shares with the page for instance. The project's directory is `app-server-project-directory`, and it is on `load-path` (after Emacs's own libraries), so a library of the project is found by `require`:
+
+```elisp
+(require 'shared)                       ; shared.el of the project, which index.html loads too
+(load (expand-file-name "rules.el" app-server-project-directory) nil t)
+```
+
+In the studio the server's Emacs has a copy of the project's text files there, and a saved file that it loaded is loaded again; under a native Emacs they are the project's files.
+
 The same project runs for real under a native Emacs, which then is the web server. The download (next section) brings the script for it:
 
 ```sh
@@ -142,7 +151,7 @@ There are three things to wait for, none of which blocks:
 - `(app-server-after SECONDS FUNCTION)`: a moment.
 - `(app-server-run '("program" "argument") :input STRING :then FUNCTION)`: a program, a second Emacs for long computations for instance. The function gets `(:status 0 :output "...")`. No shell reads the command.
 
-`(funcall fail MESSAGE [STATUS])` refuses the request, an error in a function that runs later does the same, and a request that is not answered within `app-server-deferred-timeout` (30 seconds) gets a 504. The same `server.el` works in the studio, where the page keeps the time and makes the requests for the server's Emacs (so the browser's rules for requests to other sites apply there); programs exist only under a native Emacs.
+`(funcall fail MESSAGE [STATUS])` refuses the request, an error in a function that runs later does the same, and a request that is not answered within `app-server-deferred-timeout` (30 seconds) gets a 504. The same `server.el` works in the studio, where the page keeps the time and makes the requests for the server's Emacs (so the browser's rules for requests to other sites apply there: a site that does not allow pages of other sites with CORS cannot be reached; the local studio's `--native-server` has no such limit); programs exist only under a native Emacs.
 
 Computing is not waiting: Emacs Lisp that runs, and SQLite, still hold the one thread. That is what `app-server-run` is for.
 
@@ -354,6 +363,7 @@ A clone of this repository, Node (24 or later) and Chrome are enough:
 git clone https://github.com/modeverv/elisp-studio && cd elisp-studio
 node tools/studio.mjs              # the studio, in a window of its own
 node tools/studio.mjs ~/my-app     # a project in a directory: edit it with your own Emacs
+node tools/studio.mjs ~/my-app --native-server   # its server.el in a native Emacs, as on a server
 ```
 
 Both open an application window of Chrome: no tabs, no address bar, and a profile of its own without extensions, so less of Chrome is between the keyboard and Emacs than in a tab of the browser you use every day. `--kiosk` takes the whole screen. The profile and what was fetched are kept in `~/.cache/elisp-studio/`, not in the clone. The studio needs wasmacs and elisp-react beside it; without checkouts of them (`../wasmacs` built, `../elisp-react`) their published files are fetched when they are first asked for and kept (`--update` fetches them anew).
@@ -370,7 +380,7 @@ That needs nothing in Emacs. For what a window cannot do by itself there is `lis
 | `C-M-x` | The definition at point is evaluated in the running application, without saving the file. |
 | `C-c C-e` | An expression is evaluated in the running application and its value shown: `(react-inspect)` lists the components with their props and state. |
 
-The directory is an ordinary project: `index.html`, `app.el`, `style.css`, perhaps `server.el`, and git as you like. `server.el` runs in the window as it does in the studio on the web (a third Emacs in the tab, its data in the browser's storage); to run it in a native Emacs, download the ZIP from the window and use its `run.sh`, or copy `tools/project/` yourself. `elisp-studio-local.el` also makes your Emacs know what the project is written with: when a file of the project is opened it fetches `react.el` and `app-server.el` from the studio (into `~/.cache/elisp-studio/lisp/`), puts them on `load-path` and Flymake's, and reads the project's files for their definitions (functions, variables, components) without running them, again at every save. Completion, ElDoc and `M-.` then know them, and a file that says `(require 'react)` (the template's `app.el` does) gets no false warnings from Flymake. `C-c C-p` stays the page's: your Emacs has its own git.
+The directory is an ordinary project: `index.html`, `app.el`, `style.css`, perhaps `server.el`, and git as you like. `server.el` runs in the window as it does in the studio on the web (a third Emacs in the tab, its data in the browser's storage). With `--native-server` it runs in a native Emacs instead, the server of `run.sh` (`tools/serve-project.sh`), and the application's `/api/` goes there: its data is in `.data/` of the directory, it may run programs and reach any site, and it starts again when `server.el` or a project file that it loaded is saved (the window says so). To run the project without the studio, download the ZIP from the window and use its `run.sh`, or copy `tools/project/` yourself. `elisp-studio-local.el` also makes your Emacs know what the project is written with: when a file of the project is opened it fetches `react.el` and `app-server.el` from the studio (into `~/.cache/elisp-studio/lisp/`), puts them on `load-path` and Flymake's, and reads the project's files for their definitions (functions, variables, components) without running them, again at every save. Completion, ElDoc and `M-.` then know them, and a file that says `(require 'react)` (the template's `app.el` does) gets no false warnings from Flymake. `C-c C-p` stays the page's: your Emacs has its own git.
 
 The server listens on 127.0.0.1. What it tells about the directory, and what it lets an editor do to the application, is for this machine's own programs: a request from a page of another site, or under another name than the server's own, is refused.
 

@@ -113,6 +113,15 @@ SQLite の同梱について：SQLite は[パブリックドメイン](https://w
 
 studio の中では、サーバーはブラウザのタブの中の3つ目の Emacs です。アプリケーションから `/api/...` へのリクエストはタブの外に出ず、studio がその Emacs に渡します。`server.el` を保存すると、動いているサーバーが変わります。
 
+`server.el` は、プロジェクトのほかのファイル（ページと共有するコードなど）を読み込めます。プロジェクトのディレクトリは `app-server-project-directory` で、`load-path` にも入っています（Emacs 自身のライブラリのあと）。そのため、プロジェクトのライブラリは `require` で見つかります。
+
+```elisp
+(require 'shared)                       ; プロジェクトの shared.el。index.html も読み込む
+(load (expand-file-name "rules.el" app-server-project-directory) nil t)
+```
+
+studio では、サーバーの Emacs がそこにプロジェクトのテキストファイルのコピーを持ちます。読み込んだファイルが保存されると、読み込み直します。ネイティブの Emacs では、プロジェクトのファイルそのものです。
+
 同じプロジェクトを、ネイティブの Emacs を Web サーバーにして本番として動かせます。そのためのスクリプトは、ダウンロード（次の節）に入っています。
 
 ```sh
@@ -142,7 +151,7 @@ studio の中では、サーバーはブラウザのタブの中の3つ目の Em
 - `(app-server-after 秒数 関数)`：一定の時間。
 - `(app-server-run '("program" "argument") :input 文字列 :then 関数)`：プログラム。たとえば、長い計算を任せる2つ目の Emacs です。関数は `(:status 0 :output "...")` を受け取ります。コマンドはシェルを通りません。
 
-`(funcall fail メッセージ [ステータス])` はリクエストを断ります。あとで動く関数の中のエラーも同じ扱いになり、`app-server-deferred-timeout`（30秒）以内に応答されなかったリクエストには 504 が返ります。同じ `server.el` がスタジオの中でも動きます。そこでは、サーバーの Emacs の代わりにページが時間を計り、リクエストを送ります（したがって、他のサイトへのリクエストにはブラウザの制限がかかります）。プログラムを実行できるのは、ネイティブの Emacs だけです。
+`(funcall fail メッセージ [ステータス])` はリクエストを断ります。あとで動く関数の中のエラーも同じ扱いになり、`app-server-deferred-timeout`（30秒）以内に応答されなかったリクエストには 504 が返ります。同じ `server.el` がスタジオの中でも動きます。そこでは、サーバーの Emacs の代わりにページが時間を計り、リクエストを送ります（したがって、他のサイトへのリクエストにはブラウザの制限がかかります。CORS でほかのサイトのページを許可していないサイトには届きません。ローカルの studio の `--native-server` にはこの制限がありません）。プログラムを実行できるのは、ネイティブの Emacs だけです。
 
 計算は「待ち」ではありません。実行中の Emacs Lisp と SQLite は、これまでどおり1つのスレッドを占有します。そのための手段が `app-server-run` です。
 
@@ -354,6 +363,7 @@ Caddy の後ろに複数のワーカーを置いた場合（`ab -k -c 40`）、�
 git clone https://github.com/modeverv/elisp-studio && cd elisp-studio
 node tools/studio.mjs              # スタジオを専用のウィンドウで開く
 node tools/studio.mjs ~/my-app     # ディレクトリにあるプロジェクトを、自分の Emacs で編集する
+node tools/studio.mjs ~/my-app --native-server   # その server.el をサーバーと同じくネイティブの Emacs で動かす
 ```
 
 どちらも、Chrome のアプリケーションウィンドウを開きます。タブもアドレスバーもなく、拡張機能のない専用のプロファイルを使います。そのため、ふだん使っているブラウザのタブに比べて、キーボードと Emacs の間に入る Chrome の機能が少なくなります。`--kiosk` を付けると全画面になります。プロファイルと取得したファイルは、clone の中ではなく `~/.cache/elisp-studio/` に置かれます。スタジオは、隣に wasmacs と elisp-react を必要とします。その checkout（ビルド済みの `../wasmacs` と `../elisp-react`）がなければ、公開されているファイルを最初に必要になったときに取得して保存します（`--update` で取得し直します）。
@@ -370,7 +380,7 @@ node tools/studio.mjs ~/my-app     # ディレクトリにあるプロジェク�
 | `C-M-x` | ポイント位置の定義を、ファイルを保存せずに、動いているアプリケーションの中で評価します。 |
 | `C-c C-e` | 式を動いているアプリケーションの中で評価し、値を表示します。`(react-inspect)` は部品を props と state つきで並べます。 |
 
-ディレクトリは普通のプロジェクトです。`index.html`、`app.el`、`style.css`、必要なら `server.el` があり、git も自由に使えます。`server.el` は、Web 上のスタジオと同じく、ウィンドウの中で動きます（タブの中の3つ目の Emacs で、データはブラウザのストレージに入ります）。ネイティブの Emacs で動かしたいときは、ウィンドウから ZIP をダウンロードしてその `run.sh` を使うか、`tools/project/` を自分でコピーしてください。`elisp-studio-local.el` は、プロジェクトが何で書かれているかも自分の Emacs に教えます。プロジェクトのファイルを開くと、studio から `react.el` と `app-server.el` を取得し（`~/.cache/elisp-studio/lisp/` へ）、`load-path` と Flymake のそれに加え、プロジェクトのファイルを実行せずに読んで定義（関数、変数、部品）を覚えます。保存のたびに覚え直します。これで補完、ElDoc、`M-.` がそれらを知り、`(require 'react)` と書いたファイル（テンプレートの `app.el` は書いています）は Flymake の偽の警告を受けません。`C-c C-p` はページのものです。自分の Emacs には自分の git があります。
+ディレクトリは普通のプロジェクトです。`index.html`、`app.el`、`style.css`、必要なら `server.el` があり、git も自由に使えます。`server.el` は、Web 上のスタジオと同じく、ウィンドウの中で動きます（タブの中の3つ目の Emacs で、データはブラウザのストレージに入ります）。`--native-server` を付けると、代わりにネイティブの Emacs（`run.sh` と同じサーバー、`tools/serve-project.sh`）で動き、アプリケーションの `/api/` はそこへ送られます。データはディレクトリの `.data/` に入り、プログラムを実行でき、どのサイトにも届きます。`server.el` や、それが読み込んだプロジェクトのファイルを保存すると、サーバーを起動し直します（ウィンドウにそう表示されます）。studio なしでプロジェクトを動かすには、ウィンドウから ZIP をダウンロードしてその `run.sh` を使うか、`tools/project/` を自分でコピーしてください。`elisp-studio-local.el` は、プロジェクトが何で書かれているかも自分の Emacs に教えます。プロジェクトのファイルを開くと、studio から `react.el` と `app-server.el` を取得し（`~/.cache/elisp-studio/lisp/` へ）、`load-path` と Flymake のそれに加え、プロジェクトのファイルを実行せずに読んで定義（関数、変数、部品）を覚えます。保存のたびに覚え直します。これで補完、ElDoc、`M-.` がそれらを知り、`(require 'react)` と書いたファイル（テンプレートの `app.el` は書いています）は Flymake の偽の警告を受けません。`C-c C-p` はページのものです。自分の Emacs には自分の git があります。
 
 サーバーは 127.0.0.1 で待ち受けます。ディレクトリの内容を伝える機能と、エディタからアプリケーションを操作する機能は、このマシン自身のプログラムのためのものです。他のサイトのページからのリクエストと、サーバー自身の名前以外でのリクエストは拒否します。
 

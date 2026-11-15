@@ -135,6 +135,65 @@ test("the server tells the page about the directory and passes on what an editor
   }
 });
 
+// A server.el that shares a library with the page.
+const sharedLibrary = (word) => `;;; -*- lexical-binding: t; -*-\n(defun shared-greeting () ${JSON.stringify(word)})\n(provide 'shared)\n`;
+const serverWithLibrary = `;;; -*- lexical-binding: t; -*-
+(require 'shared)
+(defun app-server-handle (method path _body)
+  (pcase (list method path)
+    ('("GET" "/api/greeting") (app-server-set-cookie "seen" "yes") (shared-greeting))
+    ('("GET" "/api/seen") (app-server-cookie "seen"))
+    (_ (signal 'file-missing (list "No such API" path)))))
+`;
+
+test("--native-server: server.el runs in a native Emacs behind the studio, and starts again when a file it loaded changes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "elisp-studio-native-"));
+  await cp(join(root, "template"), directory, { recursive: true });
+  await writeFile(join(directory, "shared.el"), sharedLibrary("one"));
+  await writeFile(join(directory, "server.el"), serverWithLibrary);
+  const { server, origin } = await serve({ project: directory, nativeServer: true });
+  let port = null;
+  try {
+    const page = await listen(`${origin}/__project/events`);
+    assert.equal((await page.next()).data.server, "native");
+    let news = await page.next();
+    assert.equal(news.event, "server");
+    assert.equal(news.data.status, "ok");
+    port = Number(/127\.0\.0\.1:(\d+)/.exec(news.data.summary)[1]);
+    // The page's own requests, as the browser makes them: cookies pass.
+    const response = await fetch(`${origin}/api/greeting`, { headers: { Origin: origin } });
+    assert.equal(await response.text(), '"one"');
+    const cookie = response.headers.get("set-cookie").split(";")[0];
+    assert.equal(await (await fetch(`${origin}/api/seen`, { headers: { Cookie: cookie } })).text(), '"yes"');
+    // A page of another site is refused by the native server, as on a server.
+    assert.equal((await fetch(`${origin}/api/greeting`, { headers: { Origin: "https://example.com" } })).status, 403);
+
+    // A file that server.el loaded changed: a new start, the new text.
+    await writeFile(join(directory, "shared.el"), sharedLibrary("two"));
+    assert.equal((await page.next()).event, "files");
+    news = await page.next();
+    assert.match(news.data.summary, /shared\.el changed: server\.el started again in a native Emacs/);
+    assert.equal(await (await fetch(`${origin}/api/greeting`)).text(), '"two"');
+    port = Number(/127\.0\.0\.1:(\d+)/.exec(news.data.summary)[1]);
+    // A file that it did not load: the same server goes on.
+    await writeFile(join(directory, "style.css"), "body {}");
+    assert.equal((await page.next()).event, "files");
+    await pause(500);
+    assert.equal(await (await fetch(`http://127.0.0.1:${port}/api/greeting`)).text(), '"two"');
+    page.close();
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+  // The native Emacs ends with the studio.
+  let gone = false;
+  for (let tries = 0; tries < 50 && !gone; tries += 1) {
+    gone = await fetch(`http://127.0.0.1:${port}/`).then(() => false, () => true);
+    if (!gone) await pause(100);
+  }
+  assert.equal(gone, true);
+});
+
 test("a sibling site without a checkout comes from where it is published, once", async () => {
   const site = await mkdtemp(join(tmpdir(), "elisp-studio-published-"));
   const cache = await mkdtemp(join(tmpdir(), "elisp-studio-cache-"));

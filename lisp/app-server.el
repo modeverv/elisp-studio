@@ -71,6 +71,33 @@
 (defvar app-server-data-directory "/data/"
   "Where `app-server-write' keeps its files.")
 
+(defvar app-server-project-directory default-directory
+  "The project's directory, the one of server.el.
+server.el loads the project's other files from here, as the page may:
+  (load (expand-file-name \"shared.el\" app-server-project-directory) nil t)
+It is on `load-path' too, after Emacs's own libraries, so `require'
+finds a library of the project.  In the studio's tab the server's Emacs
+has a copy of the project's text files here.")
+
+(defun app-server-use-project (directory)
+  "Take DIRECTORY as the project's directory (see `app-server-project-directory')."
+  (setq app-server-project-directory (file-name-as-directory (expand-file-name directory)))
+  (add-to-list 'load-path (directory-file-name app-server-project-directory) t))
+
+(defun app-server-project-files ()
+  "The files of the project that this Emacs has loaded, relative to it.
+From `load-history'; a compiled file counts as its source."
+  (let ((root (file-name-as-directory (expand-file-name app-server-project-directory)))
+        (data (file-name-as-directory (expand-file-name app-server-data-directory)))
+        (files nil))
+    (dolist (entry load-history)
+      (let ((file (car entry)))
+        (when (and (stringp file) (string-prefix-p root file) (not (string-prefix-p data file)))
+          (let ((name (substring file (length root))))
+            (when (string-suffix-p ".elc" name) (setq name (substring name 0 -1)))
+            (cl-pushnew name files :test #'equal)))))
+    (nreverse files)))
+
 (defun app-server--data-file (name)
   (unless (string-match-p "\\`[A-Za-z0-9_-]+\\'" name)
     (error "Not a name for server data: %S" name))
@@ -1200,6 +1227,33 @@ Without SQLite's transient journals and uploads that are under way."
         (lambda (url method headers body then catch)
           (app-server--tab-command "fetch" (list :url url :method method :headers headers :body body)
                                    (lambda (ok value) (funcall (if ok then catch) value))))))
+
+(defun app-server-tab-files (files removed)
+  "Copy the project's FILES ([NAME TEXT] ...) here, delete REMOVED (names).
+NAMEs are relative to `app-server-project-directory'.  A file that this
+Emacs has loaded is loaded again.  Returns the names of those."
+  (let ((loaded (app-server-project-files))
+        (again nil)
+        (coding-system-for-write 'utf-8-unix))
+    (mapc (lambda (name)
+            (ignore-errors (delete-file (app-server--project-file name))))
+          removed)
+    (mapc (lambda (entry)
+            (let ((file (app-server--project-file (aref entry 0))))
+              (make-directory (file-name-directory file) t)
+              (write-region (aref entry 1) nil file nil 'silent)
+              (when (member (aref entry 0) loaded) (push (aref entry 0) again))))
+          files)
+    (setq again (nreverse again))
+    (dolist (name again) (load (app-server--project-file name) nil t t))
+    (vconcat again)))
+
+(defun app-server--project-file (name)
+  "NAME, relative to the project, as a file name; not outside it."
+  (let ((file (expand-file-name name app-server-project-directory)))
+    (unless (string-prefix-p app-server-project-directory file)
+      (error "Not a file of the project: %S" name))
+    file))
 
 (defun app-server--tab-events ()
   "What happened since the last call, for the page:
