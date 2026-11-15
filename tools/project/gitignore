@@ -1,0 +1,10 @@
+# What the tools write into the project, which is not for the repository:
+# the local studio's address, the native server's data (the users'
+# sessions and password hashes, uploads), the Emacs that ./fetch-emacs.sh
+# copies, the libraries that test/run.sh fetches, compiled files.
+.elisp-studio.json
+.data/
+.cache/
+/vendor/wasmacs/
+/vendor/elisp-react/
+*.elc

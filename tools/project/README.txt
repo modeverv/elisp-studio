@@ -8,6 +8,11 @@ An application written in Emacs Lisp, made with elisp-studio
   backup.sh                       copy what the server keeps (.data/), while it runs
   server/                         what run.sh loads into Emacs
   server/deploy/                  for publishing: Caddy, nginx, systemd
+  .gitignore                      what git should not keep: .data/ (the users'
+                                  sessions and password hashes), vendor/wasmacs/, ...
+  test/run.sh                     check it: every .el file compiles without a
+                                  warning, then the tests in test/ (ERT) pass
+  .github/workflows/test.yml      the same at every push to GitHub
 
 To run it you need bash and GNU Emacs 29 or later (and, if server.el
 checks passwords, python3 makes that twenty times faster; it works without):

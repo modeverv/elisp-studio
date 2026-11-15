@@ -337,11 +337,12 @@ try {
     const zip = await window.elispStudio.zip();
     const text = new TextDecoder("latin1").decode(zip);
     const names = ["index.html", "app.el", "style.css", "server.el", "run.sh", "fetch-emacs.sh", "backup.sh", "server/serve-project.el", "server/app-server.el", "server/LICENSE", "README.txt",
-      "server/deploy/Caddyfile", "server/deploy/nginx.conf", "server/deploy/app.service"];
+      "server/deploy/Caddyfile", "server/deploy/nginx.conf", "server/deploy/app.service",
+      ".gitignore", "test/run.sh", "test/app-test.el", ".github/workflows/test.yml"];
     return { magic: text.slice(0, 2), missing: names.filter((name) => !text.includes(name)), git: text.includes(".git/") };
   })()`);
   assert.deepEqual(zipNames, { magic: "PK", missing: [], git: false });
-  pass("the project downloads as a ZIP archive, with run.sh and the server files");
+  pass("the project downloads as a ZIP archive, with run.sh, the server files, .gitignore and the tests with their CI workflow");
 
   // C-c C-p commits; with a remote it pushes.  The remote here is a bare
   // repository in Emacs's own filesystem.

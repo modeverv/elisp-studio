@@ -32,7 +32,7 @@ const LOCAL = new URLSearchParams(location.search).get("project") === "local"
 const example = new URLSearchParams(location.search).get("example");
 const TEMPLATE = /^[a-z0-9-]+$/.test(example || "") ? `examples/${example}/` : "template/";
 const TEMPLATE_FILES = ["index.html", "app.el", "style.css"];
-const TEMPLATE_OPTIONAL_FILES = ["server.el"];
+const TEMPLATE_OPTIONAL_FILES = ["server.el", "test/app-test.el"];
 const SERVER_FILE = "server.el";
 // The server's data in IndexedDB.  A studio of this machine opens one
 // directory after another on the same address, so there each has its own.
@@ -110,6 +110,7 @@ async function editorForms() {
       (unless (file-exists-p ${lispString(`${PROJECT}/index.html`)})
         (make-directory ${lispString(PROJECT)} t)
         ${template.map(([name, content]) => `(unless (file-exists-p ${lispString(`${PROJECT}/${name}`)})
+          (make-directory ${lispString(`${PROJECT}/${name}`.replace(/[^/]*$/, ""))} t)
           (write-region ${lispString(content)} nil ${lispString(`${PROJECT}/${name}`)} nil 'silent))`).join("\n        ")}))`,
     // The first Lisp file index.html loads, or app.el.
     String.raw`(find-file
@@ -839,8 +840,13 @@ function onEditorMessage(text) {
 }
 
 // The project as one file, ready to run somewhere else: its own files, and
-// what makes a native Emacs its web server (run.sh; see tools/project/).
+// what makes a native Emacs its web server (run.sh; see tools/project/),
+// keeps it in git (.gitignore) and checks it (test/run.sh, also in CI).
+// tools/studio.mjs gives a new project of a directory the same (SCAFFOLD).
 const RUNTIME_FILES = [
+  [".gitignore", "tools/project/gitignore", false],
+  ["test/run.sh", "tools/project/test/run.sh", true],
+  [".github/workflows/test.yml", "tools/project/test.yml", false],
   ["run.sh", "tools/project/run.sh", true],
   ["fetch-emacs.sh", "tools/project/fetch-emacs.sh", true],
   ["backup.sh", "tools/project/backup.sh", true],
