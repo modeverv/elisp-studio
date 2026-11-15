@@ -44,7 +44,7 @@ What happens when a file is saved:
 
 | File | Effect |
 |---|---|
-| a `.el` file that `index.html` loads | Compiled and evaluated in the running application. Components that are defined again render with the state they have. |
+| a `.el` file that `index.html` loads | Compiled and evaluated in the running application, then every component renders again with the state it has, so that a changed helper or `defconst` shows too (a `defvar` keeps its value when it is evaluated again: use `defconst` for data you edit). Functions in `elisp-studio-after-load-functions` are called first with the files' names, to rebuild what the application computed at its start. |
 | a stylesheet that `index.html` links | Swapped in place. |
 | `index.html` | The application starts again (its state is reset). |
 | `server.el` | Evaluated in the running server, which keeps its data. |
