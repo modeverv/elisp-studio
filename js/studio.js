@@ -11,6 +11,10 @@
 // whenever one changes; a changed .el file is evaluated in the running
 // application, whose components keep their state; a changed stylesheet is
 // swapped; a changed index.html starts the application again.
+//
+// With ?project=local, on one's own machine (tools/studio.mjs DIRECTORY),
+// there is no editor in the page: the project is a directory, edited with
+// whatever one edits with, and tools/serve.mjs reports its files.
 import { projectFiles } from "./tar.js";
 import { createZip } from "./zip.js";
 
@@ -18,7 +22,11 @@ const here = new URL("../", import.meta.url);                 // .../elisp-studi
 // The sibling sites, on the same origin (GitHub Pages: modeverv.github.io/...).
 const WASMACS = new URL("../wasmacs/", here);
 const ELISP_REACT = new URL("../elisp-react/", here);
-const PROJECT = "/home/user/elisp-studio/app";
+let PROJECT = "/home/user/elisp-studio/app";
+// A project in a directory of this machine: only a server of this machine
+// can have one.
+const LOCAL = new URLSearchParams(location.search).get("project") === "local"
+  && ["127.0.0.1", "localhost"].includes(location.hostname);
 // What a new project starts with: template/, or with ?example=NAME one of
 // examples/.  server.el is optional.  (A project that exists is left alone.)
 const example = new URLSearchParams(location.search).get("example");
@@ -143,6 +151,12 @@ function editorLog(log, loaded, path) {
 // (with the compiler's messages, where one can jump to their places).
 function report(status, summary, log = "") {
   setStatus(summary, status);
+  if (LOCAL) {
+    // The editor is somewhere on this machine; the server passes it on.
+    fetch("/__project/report", { method: "POST", body: JSON.stringify({ status, summary: `elisp-studio: ${summary}`, log }) })
+      .catch(() => {});
+    return;
+  }
   tellEditor({ type: "log", status, summary: `elisp-studio: ${summary}`, log });
 }
 
@@ -680,8 +694,34 @@ window.elispStudio = {
   editor: editorFrame,
 };
 
+// The project in a directory: the server says what its files are, now and
+// whenever one changed, and passes on what an editor wants evaluated.
+function listenToDirectory() {
+  document.body.classList.add("local");
+  setStatus("waiting for the project's files…");
+  const events = new EventSource("/__project/events");
+  events.addEventListener("files", (event) => {
+    const { directory, files: given } = JSON.parse(event.data);
+    PROJECT = directory;
+    document.querySelector("#project").textContent = directory;
+    document.title = `${directory.split("/").filter(Boolean).pop()} · elisp-studio`;
+    const next = new Map(Object.entries(given));
+    queue = queue.then(() => applyProject(next)).catch((error) => {
+      setStatus("studio error", "error");
+      showError(error.stack || String(error));
+    });
+  });
+  events.addEventListener("eval", (event) => {
+    const { file, text } = JSON.parse(event.data);
+    queue = queue.then(() => evalInApplication(file, text)).catch(() => {});
+  });
+  events.onerror = () => setStatus("the studio's server does not answer (tools/studio.mjs); waiting for it…", "error");
+}
+
 try {
-  if (!window.crossOriginIsolated) {
+  if (LOCAL) {
+    listenToDirectory();
+  } else if (!window.crossOriginIsolated) {
     setStatus("waiting for cross-origin isolation (the page reloads once)…");
   } else {
     await ensureEditorServiceWorker();

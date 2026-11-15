@@ -340,6 +340,33 @@ Caddy の後ろに複数のワーカーを置いた場合（`ab -k -c 40`）、�
   `vendor/` には、スタジオと同じく Emacs 付属の Lisp がすべて入ります。そのため、スタジオで動いたものはサイトでも動きます。`app.el` が一部の処理でだけ `require` するライブラリ（`(require 'calc)` など）は、そのときに取得されます。`./fetch-emacs.sh --core` を使うと、コピーする量が減ります（約45MB）。入るのは言語とそのライブラリ（`cl-lib`、`seq`、`map`、`json`、`rx`、`generator`、`iso8601`、`url-util`、文字コード表。コンパイル済みのみ）で、エディタ用のライブラリとソースは入りません。Org、Calc、各言語のモードを `require` するページは、スタジオで動いていても、サイトでは「Cannot open load file」で失敗します。このオプションは、ディスクに余裕がないマシンで、ページを試したうえで使うものです。
 - Emacs の **`C-c C-p`**（`M-x elisp-studio-publish`）：Emacs の中で動く git で `git add`、`git commit` を行い、`origin` というリモートがあれば `git push` します。GitHub へ HTTPS で push するには、[wasmacs の companion 拡張](https://github.com/modeverv/wasmacs#network-access)と、リモートの認証情報が必要です（最初に1回、`M-x shell` で `cd ~/elisp-studio/app`、`git remote add origin https://github.com/YOU/REPOSITORY.git`）。`server.el` のないプロジェクトを GitHub Pages を有効にしたリポジトリに push すれば、そのまま Web に公開されます。
 
+## 自分のマシンで使う
+
+このリポジトリの clone と、Node（24 以降）、Chrome があれば動きます。
+
+```sh
+git clone https://github.com/modeverv/elisp-studio && cd elisp-studio
+node tools/studio.mjs              # スタジオを専用のウィンドウで開く
+node tools/studio.mjs ~/my-app     # ディレクトリにあるプロジェクトを、自分の Emacs で編集する
+```
+
+どちらも、Chrome のアプリケーションウィンドウを開きます。タブもアドレスバーもなく、拡張機能のない専用のプロファイルを使います。そのため、ふだん使っているブラウザのタブに比べて、キーボードと Emacs の間に入る Chrome の機能が少なくなります。`--kiosk` を付けると全画面になります。プロファイルと取得したファイルは、clone の中ではなく `~/.cache/elisp-studio/` に置かれます。スタジオは、隣に wasmacs と elisp-react を必要とします。その checkout（ビルド済みの `../wasmacs` と `../elisp-react`）がなければ、公開されているファイルを最初に必要になったときに取得して保存します（`--update` で取得し直します）。
+
+**1つ目の形**は、Web 上のスタジオと同じものを clone から配信します。Emacs はページの中にあり、プロジェクトはブラウザのストレージにあります。
+
+**2つ目の形**では、ページの中に Emacs はありません。プロジェクトはそのディレクトリです（新しいディレクトリにはテンプレートのファイルが入ります）。ウィンドウはアプリケーションを表示し、ディレクトリを見張ります。そこに保存されたファイルは、何が保存したものであっても、ページの中の Emacs で保存したときと同じように反映されます。変更された `.el` ファイルは動いているアプリケーションの中で評価され、状態は保たれます。スタイルシートは差し替えられ、`index.html` が変わるとアプリケーションが起動し直されます。
+
+ここまでは、Emacs 側に何も必要ありません。ウィンドウだけではできないことのために、`lisp/elisp-studio-local.el` があります。編集に使う Emacs で読み込むと（読み込むための1行はスクリプトが表示します）、そのプロジェクトのファイルで次のことができます。
+
+| | |
+|---|---|
+| `C-x C-s` | いつも通り保存します。そのあと、スタジオの応答がエコーエリアに出ます（「app.el updated: no reload, state kept」）。コンパイラの警告やエラーがあるときは `*elisp-studio*` バッファに出て、`next-error` で自分のファイルのその場所に移動できます。 |
+| `C-M-x` | ポイント位置の定義を、ファイルを保存せずに、動いているアプリケーションの中で評価します。 |
+
+ディレクトリは普通のプロジェクトです。`index.html`、`app.el`、`style.css`、必要なら `server.el` があり、git も自由に使えます。`server.el` は、Web 上のスタジオと同じく、ウィンドウの中で動きます（タブの中の3つ目の Emacs で、データはブラウザのストレージに入ります）。ネイティブの Emacs で動かしたいときは、ウィンドウから ZIP をダウンロードしてその `run.sh` を使うか、`tools/project/` を自分でコピーしてください。ページの中の Emacs が保存以外に提供している機能（プロジェクト自身の定義による補完と Flymake、`C-c C-p`）は、`elisp-studio-local.el` にはありません。自分の Emacs の機能を使ってください。
+
+サーバーは 127.0.0.1 で待ち受けます。ディレクトリの内容を伝える機能と、エディタからアプリケーションを操作する機能は、このマシン自身のプログラムのためのものです。他のサイトのページからのリクエストと、サーバー自身の名前以外でのリクエストは拒否します。
+
 ## 言語サーバー（LSP）は？
 
 Emacs の LSP クライアントである Eglot は、この Emacs に入っていて読み込めます。足りないのは相手になる言語サーバーです。wasmacs の process service 向けにビルドされたプログラムである必要があり、今はありません。Emacs Lisp については言語サーバーは不要です。補完、説明、定義へのジャンプは Emacs 自身の機能で、診断は Emacs のバイトコンパイラから得ています。
@@ -361,15 +388,17 @@ studio は、単独でも存在する2つのものをつなぐ配線にすぎま
 
 ## 開発
 
-studio は、同じオリジンに2つの兄弟サイトを必要とします。このリポジトリの隣に checkout（ビルド済みの `../wasmacs` と `../elisp-react`）がある状態で実行します。
+studio は、同じオリジンに2つの兄弟サイトを必要とします。このリポジトリの隣に checkout（ビルド済みの `../wasmacs` と `../elisp-react`）がある状態で実行します（なければ、サーバーが公開されているファイルを使います）。
 
 ```sh
 npm run serve            # http://127.0.0.1:5190/elisp-studio/
-npm run test:unit        # tar、zip、ネイティブの Emacs で配信したプロジェクト
+npm run studio           # 同じものを専用のウィンドウで開く。ディレクトリを渡すと、ディスク上のプロジェクトを扱う
+npm run test:unit        # tar、zip、ネイティブの Emacs で配信したプロジェクト、ディレクトリにあるプロジェクト
 npm run test:e2e         # headless Chrome で studio を操作
 npm run test:e2e:plain   # 同じテストを、GitHub Pages と同じく分離ヘッダーなしで実行
 npm run test:e2e:sqlite  # SQLite のサンプル。studio の中で動かし、ダウンロードして単独でも動かす
 npm run test:e2e:upload  # アップロードのサンプルを studio の中で動かす
+npm run test:e2e:local   # ディレクトリにあるプロジェクトを、外からとネイティブの Emacs から保存する
 node tools/record-demo.mjs   # この README の画像を録画し直す（ffmpeg が必要）
 ```
 

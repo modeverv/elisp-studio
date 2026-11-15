@@ -340,6 +340,33 @@ Deferring itself costs nothing to speak of: a handler that defers and answers at
   `vendor/` holds all of Emacs's Lisp, as the studio does, so what ran in the studio runs on the site: a library that `app.el` requires only in some corner (`(require 'calc)`) is fetched when it is required. `./fetch-emacs.sh --core` copies less (about 45 MB): the language and its library (`cl-lib`, `seq`, `map`, `json`, `rx`, `generator`, `iso8601`, `url-util`, the charsets, compiled), without the editor's own libraries and without source. A page that requires Org, Calc or a programming mode then fails on the site with "Cannot open load file" although it ran in the studio, so that option is for a machine that is short of disk, after trying the page.
 - **`C-c C-p`** in Emacs (`M-x elisp-studio-publish`): `git add`, `git commit` and, if the repository has a remote named `origin`, `git push`, with the git that runs inside Emacs. Pushing to GitHub over HTTPS needs the [wasmacs companion extension](https://github.com/modeverv/wasmacs#network-access) and credentials for the remote (once: `M-x shell`, `cd ~/elisp-studio/app`, `git remote add origin https://github.com/YOU/REPOSITORY.git`). A project without `server.el` pushed to a repository with GitHub Pages enabled is then on the web.
 
+## On your own machine
+
+A clone of this repository, Node (24 or later) and Chrome are enough:
+
+```sh
+git clone https://github.com/modeverv/elisp-studio && cd elisp-studio
+node tools/studio.mjs              # the studio, in a window of its own
+node tools/studio.mjs ~/my-app     # a project in a directory: edit it with your own Emacs
+```
+
+Both open an application window of Chrome: no tabs, no address bar, and a profile of its own without extensions, so less of Chrome is between the keyboard and Emacs than in a tab of the browser you use every day. `--kiosk` takes the whole screen. The profile and what was fetched are kept in `~/.cache/elisp-studio/`, not in the clone. The studio needs wasmacs and elisp-react beside it; without checkouts of them (`../wasmacs` built, `../elisp-react`) their published files are fetched when they are first asked for and kept (`--update` fetches them anew).
+
+**The first form** is the studio as on the web, served from the clone: Emacs in the page, the project in the browser's storage.
+
+**The second form** has no Emacs in the page. The project is the directory (a new one gets the template's files), and the window shows the application and follows the directory: a file saved there, by whatever saved it, is applied as a save in the page's Emacs would be. A changed `.el` file is evaluated in the running application, whose state stays; a stylesheet is swapped; `index.html` starts it again.
+
+That needs nothing in Emacs. For what a window cannot do by itself there is `lisp/elisp-studio-local.el`; load it in the Emacs you edit with (the script prints the line), and in the files of such a project:
+
+| | |
+|---|---|
+| `C-x C-s` | As ever; then the studio's answer appears in the echo area ("app.el updated: no reload, state kept"), or the compiler's warnings and the error in the buffer `*elisp-studio*`, where `next-error` goes to their places in your files. |
+| `C-M-x` | The definition at point is evaluated in the running application, without saving the file. |
+
+The directory is an ordinary project: `index.html`, `app.el`, `style.css`, perhaps `server.el`, and git as you like. `server.el` runs in the window as it does in the studio on the web (a third Emacs in the tab, its data in the browser's storage); to run it in a native Emacs, download the ZIP from the window and use its `run.sh`, or copy `tools/project/` yourself. What the Emacs in the page offers beyond saving (completion and Flymake from the project's own definitions, `C-c C-p`) is not in `elisp-studio-local.el`: your Emacs has its own.
+
+The server listens on 127.0.0.1. What it tells about the directory, and what it lets an editor do to the application, is for this machine's own programs: a request from a page of another site, or under another name than the server's own, is refused.
+
 ## Language servers?
 
 Emacs's LSP client, Eglot, is in this Emacs and loads. What is missing is a language server to talk to: it would have to be a program built for wasmacs's process service, and none is. For Emacs Lisp no server is needed: completion, documentation and jumping to definitions are Emacs's own, and the diagnostics come from Emacs's byte compiler.
@@ -361,15 +388,17 @@ The studio is only the wire between two things that exist without it: the editor
 
 ## Development
 
-The studio needs its two siblings on the same origin. With checkouts next to this one (`../wasmacs` built, `../elisp-react`):
+The studio needs its two siblings on the same origin. With checkouts next to this one (`../wasmacs` built, `../elisp-react`; without them the server takes their published files):
 
 ```sh
 npm run serve            # http://127.0.0.1:5190/elisp-studio/
-npm run test:unit        # tar, zip, and a project served by a native Emacs
+npm run studio           # the same in a window of its own; with a directory, a project on the disk
+npm run test:unit        # tar, zip, a project served by a native Emacs, a project in a directory
 npm run test:e2e         # the studio in headless Chrome
 npm run test:e2e:plain   # the same without isolation headers, as GitHub Pages serves
 npm run test:e2e:sqlite  # the SQLite example: in the studio, then downloaded and run by itself
 npm run test:e2e:upload  # the upload example in the studio
+npm run test:e2e:local   # a project in a directory, saved from outside and from a native Emacs
 node tools/record-demo.mjs   # record the pictures of this README again (needs ffmpeg)
 ```
 

@@ -141,9 +141,20 @@ Requests and responses are printed Lisp on both. Nothing a page sends is evaluat
 
 The studio already has the project's files (it reads them from the editor's image), so the ZIP is built in the page (`js/zip.js`). The git path lives entirely in Emacs: `elisp-studio-publish` runs `git` with `process-file` in wasmacs's process service. Hidden files, `.git` among them, are not part of what the studio treats as the project.
 
+## A project in a directory
+
+On one's own machine the editor does not have to be the Emacs in the page. `tools/studio.mjs DIRECTORY` starts the development server with that directory and a window on `?project=local`. The page then starts no editor frame; `tools/local-project.mjs` looks at the directory every 150 ms and, when its text files have changed and stopped changing, sends all of them to the page (server-sent events). The page gives them to the same `applyProject` that gets the files of the editor's image, so everything after that is the path of a save in the studio: the server first, then the changed files, state kept. It is the directory that is watched, not an editor, so any program that writes files will do, and what editors leave beside a file (backups, lock files, compiled files) is not part of the project, as in the editor's image.
+
+The way back is `report`: where the studio would type its answer into the page's Emacs, it posts it to the server, which keeps the latest with a number. `lisp/elisp-studio-local.el`, in a native Emacs, asks for that number before a save and for the next report after it afterwards, with a request that waits; the compiler's messages name the files of the directory, because the page calls the project by the directory's name. `C-M-x` posts the definition to the server, which passes it to the page as an event, and waits for the report in the same way. A file `.elisp-studio.json` in the directory tells Emacs which files belong to a project and where its studio is.
+
+These requests (`/__project/...`) can read the directory's text files and evaluate Lisp in the application, so the server answers them only under its own name and not to a page of another site (the `Origin` and `Sec-Fetch-Site` of a browser, the `Host` against a domain pointed at 127.0.0.1). An editor is not a browser and sends neither.
+
+The window is Chrome with `--app` and a profile of its own. Sibling sites without a checkout are fetched from where they are published and kept, whole files only: a part of `temacs.data` that the page's Emacs asks a range of is fetched whole once.
+
 ## What is not there yet
 
 - More than one project, and a way to start a new one from the page.
+- For a project in a directory: `server.el` in a native Emacs next to the window (it runs in the tab), and the page's Emacs and the directory kept in step with each other.
 - Locations for errors that happen while the application runs.
 - A language server for anything but Emacs Lisp: Eglot is there, a server program for wasmacs's process service is not.
 - A button for the whole way to a public URL (create the repository, push, enable Pages).

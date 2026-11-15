@@ -31,6 +31,8 @@
       #error { display: none; margin: 0; padding: 8px 12px; max-height: 30%; overflow: auto; flex: none;
                background: #4a1212; color: #fff; font: 12px/1.4 monospace; white-space: pre-wrap; }
       #error.shown { display: block; }
+      /* A project in a directory of this machine: no editor here. */
+      body.local .editor-pane { display: none; }
     </style>
   </head>
   <body>
@@ -43,7 +45,7 @@
       <a href="https://github.com/modeverv/elisp-studio">about</a>
     </header>
     <main>
-      <section class="pane">
+      <section class="pane editor-pane">
         <h2>Emacs: edit and save (C-x C-s)</h2>
         <iframe id="editor" title="Emacs"></iframe>
       </section>
