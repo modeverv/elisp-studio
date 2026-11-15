@@ -19,6 +19,9 @@
 //                                    up to &wait=SECONDS for it: for the editor
 //   POST /__project/eval             { file, text }: evaluate TEXT in the
 //                                    running application, as C-M-x does
+//   GET  /__project/files/PATH       a file of the project, for the
+//                                    application (images, data): not hidden
+//                                    files, server*, *.sh or .data/
 //
 // lisp/elisp-studio-local.el is the Emacs side of the last three.
 //
@@ -26,13 +29,29 @@
 // so they are for this machine's own programs: a request under another name
 // than this server's (a page elsewhere that points its domain here) or from
 // a page of another site is refused.
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { createReadStream, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { extname, join, resolve, sep } from "node:path";
 
 const TEXT = /\.(?:html|el|css|js|mjs|json|txt|md|svg|eld)$/i;
 // What a downloaded project carries besides itself, and what tools leave.
 const NOT_THE_PROJECT = new Set(["vendor", "server", "node_modules"]);
 const LARGEST = 1024 * 1024;
+const FILE_TYPES = {
+  ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript",
+  ".json": "application/json", ".txt": "text/plain; charset=utf-8", ".md": "text/markdown; charset=utf-8",
+  ".el": "text/plain; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".ico": "image/x-icon",
+  ".woff2": "font/woff2", ".woff": "font/woff", ".mp3": "audio/mpeg", ".mp4": "video/mp4", ".pdf": "application/pdf",
+};
+
+/** May the application see PATH (relative, with /)?  As the project server
+    has it: no hidden files, nothing of the server, no scripts to run. */
+export function servable(path) {
+  const parts = path.split("/");
+  const base = parts[parts.length - 1];
+  return parts.every((part) => part && !part.startsWith(".")) && !base.startsWith("server")
+    && parts[0] !== "server" && !base.endsWith(".sh") && !base.endsWith("~");
+}
 const LOOK_EVERY_MS = 150;
 
 /** The text files of DIRECTORY: { files: { name: text }, stamp }. */
@@ -136,6 +155,17 @@ export function localProject(directory) {
         });
       }
       return json(response, 200, report.n > after ? report : { n: report.n });
+    }
+    if (request.method === "GET" && url.pathname.startsWith("/__project/files/")) {
+      const relative = decodeURIComponent(url.pathname.slice("/__project/files/".length));
+      const file = resolve(directory, relative);
+      if (!servable(relative) || !file.startsWith(directory + sep) || !existsSync(file) || !statSync(file).isFile()) {
+        return json(response, 404, { error: "not a file of the project" });
+      }
+      response.writeHead(200, { "Content-Type": FILE_TYPES[extname(file).toLowerCase()] || "application/octet-stream",
+                                "Cache-Control": "no-store", "Cross-Origin-Resource-Policy": "same-origin" });
+      createReadStream(file).pipe(response);
+      return;
     }
     if (what === "POST /__project/eval") {
       const given = await body(request);

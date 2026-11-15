@@ -69,6 +69,8 @@ A mistake does not take the application down: if the new code does not load, the
 
 The application has an address even though the preview is a frame without one: elisp-react keeps it in memory there (`react-location`, `react-navigate`), and the bar above the application shows it. Hash links in the application stay in the preview; type an address and press Enter to go there, or use ← and → for Back and Forward.
 
+The project's other files reach the application too. `react-fetch` of a relative URL (`"data.json"`) gets the project's file, in both studios. On your own machine the server also serves the directory at `/__project/files/` and the preview's relative URLs resolve there, so `<img src="photo.png">` and fonts work; not served are hidden files, `server*`, `*.sh` and `.data/`. In the studio in the page, files that are not text (images) are kept as bytes, but only `react-fetch` reaches them: an `<img>` needs a `data:` URL there.
+
 ## A server side
 
 A project with a `server.el` has a server. The file defines one function:

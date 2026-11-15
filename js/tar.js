@@ -31,10 +31,14 @@ export function readTar(bytes) {
   return files;
 }
 
+const strict = new TextDecoder("utf-8", { fatal: true });
+
 /**
- * The text files below DIRECTORY (like "home/user/project") in the archive:
- * a Map from the path relative to it to the text.  Editor leftovers
- * (backups, auto-saves, lock files) and hidden files (.git) are left out.
+ * The files below DIRECTORY (like "home/user/project") in the archive: a
+ * Map from the path relative to it to the text, or to the bytes (a
+ * Uint8Array) of a file that is not UTF-8 text (an image).  Editor
+ * leftovers (backups, auto-saves, lock files) and hidden files (.git) are
+ * left out.
  */
 export function projectFiles(bytes, directory) {
   const root = `${directory.replace(/^\/+|\/+$/g, "")}/`;
@@ -46,7 +50,9 @@ export function projectFiles(bytes, directory) {
     if (base.endsWith("~") || base.startsWith("#") || base.endsWith(".elc")) continue;
     // Hidden files and directories (.git, lock files) are not the project's content.
     if (relative.split("/").some((part) => part.startsWith("."))) continue;
-    files.set(relative, decoder.decode(content));
+    let text;
+    try { text = strict.decode(content); } catch (_) { text = content.slice(); }
+    files.set(relative, text);
   }
   return files;
 }
