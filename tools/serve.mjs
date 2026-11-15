@@ -40,7 +40,7 @@ export async function serve({ port = 0, plain = false } = {}) {
       response.writeHead(404).end("not found");
       return;
     }
-    response.writeHead(200, {
+    const headers = {
       "Content-Type": mimeTypes[extname(file)] || "application/octet-stream",
       "Cache-Control": "no-store",
       ...(plain ? {} : {
@@ -48,7 +48,19 @@ export async function serve({ port = 0, plain = false } = {}) {
         "Cross-Origin-Embedder-Policy": "require-corp",
         "Cross-Origin-Resource-Policy": "cross-origin",
       }),
-    });
+    };
+    // A part of a file, as GitHub Pages sends one: the application's Emacs
+    // reads its Lisp files as ranges of one large file.
+    const size = statSync(file).size;
+    const range = /^bytes=(\d+)-(\d+)$/.exec(request.headers.range || "");
+    if (range && Number(range[1]) <= Number(range[2]) && Number(range[1]) < size) {
+      const start = Number(range[1]);
+      const end = Math.min(Number(range[2]), size - 1);
+      response.writeHead(206, { ...headers, "Content-Range": `bytes ${start}-${end}/${size}`, "Content-Length": end - start + 1 });
+      createReadStream(file, { start, end }).pipe(response);
+      return;
+    }
+    response.writeHead(200, headers);
     createReadStream(file).pipe(response);
   });
   await new Promise((done, fail) => {

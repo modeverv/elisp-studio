@@ -2,7 +2,7 @@
 
 Write a web application in Emacs Lisp, in the browser, and watch it change without a reload.
 
-Live: <https://modeverv.github.io/elisp-studio/> (Chrome on a desktop; the first visit downloads Emacs, about 150 MB, which the browser then keeps).
+Live: <https://modeverv.github.io/elisp-studio/> (Chrome on a desktop; the first visit downloads the editor's Emacs, about 150 MB, which the browser then keeps. An application made here is another matter: its visitors download about 5 MB).
 
 [日本語](README.ja.md)
 
@@ -270,7 +270,7 @@ Tried with Caddy 2.11 (HTTPS with HTTP/2) and nginx 1.30 in front, with the ship
 
 [doc/security.md](doc/security.md) is the record of a security check of this server (OWASP ZAP, about a hundred hand-made requests, an independent reading of the code): two serious problems and nine lesser ones were found and fixed, and it says what was left as it is. In short: a request could make the server open an SSH connection to a machine of the sender's choice, and a visitor could fill its memory; neither is possible any more, and a test fails if either comes back.
 
-What is not there: streaming answers and WebSockets, functions for tokens and answers to pages of other sites ("Tokens" above), forms that upload (`multipart/form-data`; a page sends the file itself), and ranges of a file (a video cannot be skipped through). Nobody has attacked this server in earnest: it is a few hundred lines of Emacs Lisp behind a proxy, for applications among friends.
+What is not there: streaming answers and WebSockets, functions for tokens and answers to pages of other sites ("Tokens" above), forms that upload (`multipart/form-data`; a page sends the file itself), and ranges of a file that a handler sends (a video among the uploaded files cannot be skipped through; a file of the project itself can be asked for in parts). Nobody has attacked this server in earnest: it is a few hundred lines of Emacs Lisp behind a proxy, for applications among friends.
 
 ### How fast is that server?
 
@@ -318,13 +318,24 @@ Deferring itself costs nothing to speak of: a handler that defers and answers at
   ```text
   index.html, app.el, style.css, server.el    the project
   run.sh              ./run.sh [PORT]: Emacs becomes the web server of this directory
-  fetch-emacs.sh      optional: download the browser's Emacs into vendor/ (about 160 MB, needs curl)
+  fetch-emacs.sh      optional: download the browser's Emacs into vendor/ (about 40 MB, needs curl)
   backup.sh           copy what the server keeps (.data/) while it runs
   server/             what run.sh loads into Emacs (the HTTP server and app-server.el, with their LICENSE)
   README.txt
   ```
 
   After `./run.sh`, Emacs serves the page and answers its requests. The Emacs that runs the page's `app.el` in the browser is downloaded by the page from the wasmacs site; after `./fetch-emacs.sh` it is served from `vendor/` by the same Emacs instead, and nothing needs the internet any more.
+
+  What a visitor downloads is small either way: Emacs itself (about 5 MB as a web server compresses it) and, of Emacs's Lisp files, the ones the page reads. The page asks the server for the part of the package that holds a file (a range request); the project's server, GitHub Pages, nginx and Caddy answer those. From a server that sends whole files only (Python's `http.server`), the page downloads the package whole, once.
+
+  What `vendor/` holds is a choice:
+
+  | | in `vendor/` | Emacs's Lisp |
+  |---|---|---|
+  | `./fetch-emacs.sh` | about 40 MB | the language and its library: `lisp/` itself, `emacs-lisp/`, `international/`, `url/`, `calendar/`, compiled, and the charset maps |
+  | `./fetch-emacs.sh --full` | about 165 MB | all of it, with source: Org, Calc, Gnus, the programming modes, the input methods |
+
+  The studio itself always has all of it. So an `app.el` that requires one of the editor's libraries (`(require 'calc)`) works in the studio and fails with "Cannot open load file" on a site with the smaller copy: take `--full` there. `cl-lib`, `seq`, `map`, `subr-x`, `json`, `rx`, `generator`, `iso8601`, `url-util` and SQLite are in the smaller one (most of them inside Emacs's dump, where they cost no download at all).
 - **`C-c C-p`** in Emacs (`M-x elisp-studio-publish`): `git add`, `git commit` and, if the repository has a remote named `origin`, `git push`, with the git that runs inside Emacs. Pushing to GitHub over HTTPS needs the [wasmacs companion extension](https://github.com/modeverv/wasmacs#network-access) and credentials for the remote (once: `M-x shell`, `cd ~/elisp-studio/app`, `git remote add origin https://github.com/YOU/REPOSITORY.git`). A project without `server.el` pushed to a repository with GitHub Pages enabled is then on the web.
 
 ## Language servers?

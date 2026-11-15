@@ -22,11 +22,19 @@ SQLite, which most are).
 
 The page's own program, app.el, does not run in that Emacs.  It runs in
 the visitor's browser, in a second GNU Emacs compiled to WebAssembly, which
-the page downloads (about 160 MB the first time; the browser keeps it).
+the page downloads (about 5 MB the first time; the browser keeps it).
 By default it comes from https://modeverv.github.io/wasmacs/.  To serve it
 from here instead, so that nothing needs the internet:
 
-  ./fetch-emacs.sh    downloads it into vendor/ (needs curl)
+  ./fetch-emacs.sh           downloads it into vendor/ (40 MB, needs curl)
+  ./fetch-emacs.sh --full    with all of Emacs's Lisp (165 MB)
+
+The first has Emacs Lisp and its library (cl-lib, seq, json, url, the
+calendar, the charsets) and not the editor's own libraries (Org, Calc,
+Gnus, the programming modes, source files).  If app.el requires one of
+those, the page says "Cannot open load file": take --full.  A visitor
+downloads 5 MB either way, and of Emacs's Lisp only the files the page
+reads.
 
 Without a server.el the application is a static site: index.html, app.el
 and style.css on any web server are enough.

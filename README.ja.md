@@ -2,7 +2,7 @@
 
 Emacs Lisp の Web アプリケーションをブラウザの中で書き、リロードなしで変わるのを見ながら作る環境です。
 
-公開ページ: <https://modeverv.github.io/elisp-studio/> （デスクトップの Chrome 用です。初回は Emacs 本体を約150MBダウンロードし、以後はブラウザが保持します）
+公開ページ: <https://modeverv.github.io/elisp-studio/> （デスクトップの Chrome 用です。初回はエディタ用の Emacs を約150MBダウンロードし、以後はブラウザが保持します。ここで作ったアプリケーションは別で、訪問者がダウンロードするのは約5MBです）
 
 [English](README.md)
 
@@ -270,7 +270,7 @@ PUBLIC_ORIGIN=https://example.com ./run.sh
 
 [doc/security.md](doc/security.md)（英語）は、このサーバーのセキュリティ検査の記録です。OWASP ZAP、手作りの約100件のリクエスト、独立したコード監査で調べ、重大な問題2件と軽微な問題9件を見つけて修正しました。そのままにしたものも書いてあります。要点は次のとおりです。以前は、リクエスト1つで、送信者が選んだマシンへの SSH 接続をサーバーに開かせることができ、また閲覧者がサーバーのメモリを埋めることができました。どちらも現在はできず、再発するとテストが失敗します。
 
-ないもの：ストリーミング応答と WebSocket、トークンのための関数と他サイトのページへの応答（上の「トークン」）、フォームによるアップロード（`multipart/form-data`。ページはファイルそのものを送ります）、ファイルの一部分だけの送信（動画の途中からの再生はできません）。このサーバーを本気で攻撃した人はまだいません。プロキシの後ろに置く数百行の Emacs Lisp であり、身内向けのアプリケーションのためのものです。
+ないもの：ストリーミング応答と WebSocket、トークンのための関数と他サイトのページへの応答（上の「トークン」）、フォームによるアップロード（`multipart/form-data`。ページはファイルそのものを送ります）、ハンドラが送るファイルの一部分だけの送信（アップロードされた動画の途中からの再生はできません。プロジェクト自身のファイルは、一部分だけを要求できます）。このサーバーを本気で攻撃した人はまだいません。プロキシの後ろに置く数百行の Emacs Lisp であり、身内向けのアプリケーションのためのものです。
 
 ### このサーバーの速さ
 
@@ -318,13 +318,24 @@ Caddy の後ろに複数のワーカーを置いた場合（`ab -k -c 40`）、�
   ```text
   index.html, app.el, style.css, server.el    プロジェクト
   run.sh              ./run.sh [PORT]。Emacs がこのディレクトリの Web サーバーになる
-  fetch-emacs.sh      任意。ブラウザ用の Emacs を vendor/ にダウンロードする（約160MB、curl が必要）
+  fetch-emacs.sh      任意。ブラウザ用の Emacs を vendor/ にダウンロードする（約40MB、curl が必要）
   backup.sh           サーバーが保持するもの（.data/）を、動かしたままコピーする
   server/             run.sh が Emacs に読み込ませるもの（HTTP サーバーと app-server.el、そのライセンス表示）
   README.txt
   ```
 
   `./run.sh` を実行すると、Emacs がページを配信し、ページからのリクエストに答えます。ブラウザの中でページの `app.el` を動かす Emacs は、通常はページが wasmacs のサイトからダウンロードします。`./fetch-emacs.sh` を実行したあとは、同じ Emacs が `vendor/` から配信するようになり、インターネットは不要になります。
+
+  どちらの場合も、訪問者がダウンロードする量は小さくて済みます。Emacs 本体（Web サーバーが圧縮して約5MB）と、Emacs 付属の Lisp ファイルのうちページが読んだものだけです。ページは、パッケージの中でそのファイルがある部分だけをサーバーに要求します（range リクエスト）。プロジェクトのサーバー、GitHub Pages、nginx、Caddy はこれに応えます。ファイル全体しか送らないサーバー（Python の `http.server`）からは、パッケージ全体を1回だけダウンロードします。
+
+  `vendor/` に何を置くかは選べます。
+
+  | | `vendor/` の大きさ | Emacs 付属の Lisp |
+  |---|---|---|
+  | `./fetch-emacs.sh` | 約40MB | 言語とそのライブラリ。`lisp/` 直下、`emacs-lisp/`、`international/`、`url/`、`calendar/` のコンパイル済みファイルと、文字コード表 |
+  | `./fetch-emacs.sh --full` | 約165MB | すべて（ソースつき）。Org、Calc、Gnus、各言語のモード、入力メソッドを含む |
+
+  スタジオ自身は、常にすべてを持っています。そのため、エディタ用のライブラリを `require` する `app.el`（`(require 'calc)` など）は、スタジオでは動き、小さいほうのコピーを置いたサイトでは「Cannot open load file」で失敗します。その場合は `--full` を使ってください。`cl-lib`、`seq`、`map`、`subr-x`、`json`、`rx`、`generator`、`iso8601`、`url-util`、SQLite は小さいほうに入っています（大半は Emacs のダンプの中にあり、ダウンロードも発生しません）。
 - Emacs の **`C-c C-p`**（`M-x elisp-studio-publish`）：Emacs の中で動く git で `git add`、`git commit` を行い、`origin` というリモートがあれば `git push` します。GitHub へ HTTPS で push するには、[wasmacs の companion 拡張](https://github.com/modeverv/wasmacs#network-access)と、リモートの認証情報が必要です（最初に1回、`M-x shell` で `cd ~/elisp-studio/app`、`git remote add origin https://github.com/YOU/REPOSITORY.git`）。`server.el` のないプロジェクトを GitHub Pages を有効にしたリポジトリに push すれば、そのまま Web に公開されます。
 
 ## 言語サーバー（LSP）は？

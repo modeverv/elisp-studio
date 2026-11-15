@@ -90,6 +90,58 @@ test("the template project runs under a native Emacs: files, server.el, kept dat
   }
 });
 
+test("a part of a file: the browser's Emacs reads its Lisp files as ranges of one large file", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "elisp-studio-range-"));
+  await cp(join(root, "template"), directory, { recursive: true });
+  // Larger than the pieces the server sends files in (1 MB), and not regular.
+  const big = Buffer.alloc(2_500_000);
+  for (let i = 0; i < big.length; i++) big[i] = (i * 31 + (i >> 8) * 7) & 0xff;
+  await writeFile(join(directory, "big.bin"), big);
+  await writeFile(join(directory, "small.txt"), "0123456789");
+  const server = await startServer(directory);
+  try {
+    const part = async (path, range, method = "GET") => {
+      const response = await fetch(`${server.origin}${path}`, { method, headers: range ? { Range: range } : {} });
+      return { status: response.status, range: response.headers.get("content-range"),
+               length: response.headers.get("content-length"), body: Buffer.from(await response.arrayBuffer()) };
+    };
+    const first = await part("/big.bin", "bytes=0-0");
+    assert.deepEqual([first.status, first.range, first.length], [206, "bytes 0-0/2500000", "1"]);
+    assert.deepEqual(first.body, big.subarray(0, 1));
+    // Across the server's own pieces, and to the end of the file.
+    const across = await part("/big.bin", "bytes=1048000-2100099");
+    assert.deepEqual([across.status, across.range], [206, "bytes 1048000-2100099/2500000"]);
+    assert.equal(across.body.equals(big.subarray(1048000, 2100100)), true);
+    const tail = await part("/big.bin", "bytes=2499990-");
+    assert.deepEqual([tail.status, tail.range], [206, "bytes 2499990-2499999/2500000"]);
+    assert.deepEqual(tail.body, big.subarray(2499990));
+    const beyond = await part("/big.bin", "bytes=2499990-9999999");
+    assert.deepEqual([beyond.status, beyond.range, beyond.body.length], [206, "bytes 2499990-2499999/2500000", 10]);
+    const small = await part("/small.txt", "bytes=2-5");
+    assert.deepEqual([small.status, small.range, small.body.toString()], [206, "bytes 2-5/10", "2345"]);
+    const head = await part("/big.bin", "bytes=10-19", "HEAD");
+    assert.deepEqual([head.status, head.range, head.length, head.body.length], [206, "bytes 10-19/2500000", "10", 0]);
+    // No such part; and what is not one range of bytes gets the whole file.
+    const none = await part("/big.bin", "bytes=2500000-2500001");
+    assert.deepEqual([none.status, none.range], [416, "bytes */2500000"]);
+    for (const range of ["bytes=5-2", "bytes=-5", "bytes=0-1,4-5", "lines=1-2", null]) {
+      const whole = await part("/small.txt", range);
+      assert.deepEqual([whole.status, whole.range, whole.body.toString()], [200, null, "0123456789"], String(range));
+    }
+    assert.equal((await part("/big.bin", null)).body.equals(big), true);
+    // Not of what is not served at all.
+    assert.equal((await part("/server.el", "bytes=0-9")).status, 404);
+    // The connection is kept for the next request, as for whole files.
+    const host = `Host: 127.0.0.1:${server.port}`;
+    const kept = await raw(server.port, `GET /small.txt HTTP/1.1\r\n${host}\r\nRange: bytes=0-1\r\n\r\n`
+      + `GET /small.txt HTTP/1.1\r\n${host}\r\nRange: bytes=8-9\r\nConnection: close\r\n\r\n`);
+    assert.deepEqual(kept.received.match(/HTTP\/1\.1 206|\r\n\r\n(01|89)/g), ["HTTP/1.1 206", "\r\n\r\n01", "HTTP/1.1 206", "\r\n\r\n89"]);
+  } finally {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("a handler can answer later, and the server goes on meanwhile", async () => {
   const directory = await mkdtemp(join(tmpdir(), "elisp-studio-later-"));
   await cp(join(root, "template"), directory, { recursive: true });
@@ -889,19 +941,21 @@ test("a downloaded project runs itself: run.sh, and with vendor/ its own copy of
   }
 });
 
-test("fetch-emacs.sh brings the licences of the Emacs it copies", async () => {
+test("fetch-emacs.sh copies Emacs with its core Lisp, or with all of it, and the licences", async () => {
   // Stand-ins for the two published sites, with small files.
   const site = await mkdtemp(join(tmpdir(), "elisp-studio-site-"));
   const directory = await mkdtemp(join(tmpdir(), "elisp-studio-fetch-"));
   const emacs = "wasmacs/artifacts/emacs-browser-atomics-pdump";
   const files = {
     "elisp-react/js/elisp-react.js": "// elisp-react\n", "elisp-react/lisp/react.el": ";; react\n", "elisp-react/LICENSE": "MIT License\n",
-    "wasmacs/app/eval-build-id.json": "{}", "wasmacs/app/src/emacs-eval-client.js": "// client\n",
+    "wasmacs/app/eval-build-id.json": '{"id":"0123abcd"}\n', "wasmacs/app/src/emacs-eval-client.js": "// client\n",
     "wasmacs/app/src/emacs-eval-worker.js": "// worker\n", "wasmacs/app/src/emacs-eval-core.js": "// core\n",
     "wasmacs/app/src/wasmacs-eval-service.el": ";; service\n",
     [`${emacs}/temacs.js`]: "// temacs\n", [`${emacs}/temacs.wasm`]: "wasm", [`${emacs}/bootstrap-emacs.pdmp`]: "pdmp",
-    [`${emacs}/temacs.data.parts/manifest.json`]: JSON.stringify({ parts: [{ name: "part-000" }] }, null, 2),
-    [`${emacs}/temacs.data.parts/part-000`]: "data",
+    [`${emacs}/temacs.files.json`]: '{"files":"all"}\n',
+    [`${emacs}/temacs.data.parts/manifest.json`]: JSON.stringify({ parts: [{ name: "part-000" }, { name: "part-001" }] }, null, 2),
+    [`${emacs}/temacs.data.parts/part-000`]: "data", [`${emacs}/temacs.data.parts/part-001`]: "more data",
+    [`${emacs}/temacs.core.files.json`]: '{"files":"core"}\n', [`${emacs}/temacs.core.data`]: "core data",
     "wasmacs/licenses/files.txt": "NOTICE.txt\nGPL-3.0-or-later.txt\n",
     "wasmacs/licenses/NOTICE.txt": "where the source is\n",
     "wasmacs/licenses/GPL-3.0-or-later.txt": "GNU GENERAL PUBLIC LICENSE\n",
@@ -919,17 +973,41 @@ test("fetch-emacs.sh brings the licences of the Emacs it copies", async () => {
   try {
     await cp(join(root, "tools/project/fetch-emacs.sh"), join(directory, "fetch-emacs.sh"));
     // The script downloads from a server in this process: it must not block it.
-    const script = () => new Promise((resolve) => {
-      const child = spawn(join(directory, "fetch-emacs.sh"), [], { stdio: "ignore", env: {
+    const script = (...options) => new Promise((resolve) => {
+      const child = spawn(join(directory, "fetch-emacs.sh"), options, { stdio: "ignore", env: {
         ...process.env, WASMACS_URL: `${base}/wasmacs/`, ELISP_REACT_URL: `${base}/elisp-react/` } });
       child.once("exit", resolve);
     });
-    assert.equal(await script(), 0);
     const vendor = join(directory, "vendor");
-    assert.equal(await readFile(join(vendor, "wasmacs/licenses/NOTICE.txt"), "utf8"), "where the source is\n");
-    assert.match(await readFile(join(vendor, "wasmacs/licenses/GPL-3.0-or-later.txt"), "utf8"), /GNU GENERAL PUBLIC LICENSE/);
-    assert.match(await readFile(join(vendor, "elisp-react/LICENSE"), "utf8"), /^MIT License/);
-    assert.equal(await readFile(join(vendor, `${emacs}/temacs.data.parts/part-000`), "utf8"), "data");
+    const copied = (path) => readFile(join(vendor, path), "utf8");
+    const emacsFiles = async () => (await readdir(join(vendor, emacs), { recursive: true })).sort();
+
+    // Without an option: the core package, whose index takes the name the
+    // page asks for.  A browser keeps it apart from the whole package.
+    assert.equal(await script(), 0);
+    assert.deepEqual(await emacsFiles(), ["bootstrap-emacs.pdmp", "temacs.core.data", "temacs.files.json", "temacs.js", "temacs.wasm"]);
+    assert.equal(await copied(`${emacs}/temacs.files.json`), '{"files":"core"}\n');
+    assert.equal(await copied(`${emacs}/temacs.core.data`), "core data");
+    assert.equal(await copied("wasmacs/app/eval-build-id.json"), '{"id":"0123abcd-core"}\n');
+    assert.equal(await copied("wasmacs/app/src/emacs-eval-worker.js"), "// worker\n");
+    assert.equal(await copied("wasmacs/licenses/NOTICE.txt"), "where the source is\n");
+    assert.match(await copied("wasmacs/licenses/GPL-3.0-or-later.txt"), /GNU GENERAL PUBLIC LICENSE/);
+    assert.match(await copied("elisp-react/LICENSE"), /^MIT License/);
+
+    // --full: every file of Emacs, and nothing left of the other package.
+    assert.equal(await script("--full"), 0);
+    assert.deepEqual(await emacsFiles(), ["bootstrap-emacs.pdmp", "temacs.data.parts", "temacs.data.parts/manifest.json",
+      "temacs.data.parts/part-000", "temacs.data.parts/part-001", "temacs.files.json", "temacs.js", "temacs.wasm"]);
+    assert.equal(await copied(`${emacs}/temacs.files.json`), '{"files":"all"}\n');
+    assert.equal(await copied(`${emacs}/temacs.data.parts/part-001`), "more data");
+    assert.equal(await copied("wasmacs/app/eval-build-id.json"), '{"id":"0123abcd"}\n');
+    // And back; running it twice changes nothing.
+    assert.equal(await script(), 0);
+    assert.equal(await script(), 0);
+    assert.deepEqual(await emacsFiles(), ["bootstrap-emacs.pdmp", "temacs.core.data", "temacs.files.json", "temacs.js", "temacs.wasm"]);
+    assert.equal(await copied("wasmacs/app/eval-build-id.json"), '{"id":"0123abcd-core"}\n');
+    assert.equal(await script("--everything"), 2);
+
     // A name in the list is a file of that directory or nothing.
     await writeFile(join(site, "wasmacs/licenses/files.txt"), "../../../outside.txt\n");
     assert.notEqual(await script(), 0);
@@ -940,4 +1018,3 @@ test("fetch-emacs.sh brings the licences of the Emacs it copies", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
-

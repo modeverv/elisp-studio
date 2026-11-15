@@ -32,8 +32,9 @@ const UPLOAD_TIMEOUT_MS = 60000;
 const DEFERRED_TIMEOUT_MS = 30000;   // as app-server-deferred-timeout
 const SERVER_TIMEOUT_MS = 8000;
 const LOAD_TIMEOUT_MS = 8000;
-// Starting the application: the first time Emacs may have to be downloaded
-// (150 MB); after that it comes from the browser's cache.
+// Starting the application: the first time Emacs has to be downloaded
+// (the editor's, 150 MB; the application's own is small); after that it
+// comes from the browser's cache.
 const FIRST_START_TIMEOUT_MS = 300000;
 const START_TIMEOUT_MS = 20000;
 let startedOnce = false;

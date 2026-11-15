@@ -15,8 +15,8 @@
 // and a native Emacs with SQLite.
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync, statSync } from "node:fs";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -103,8 +103,15 @@ try {
     });
     fetching.once("exit", (code) => (code === 0 ? resolve() : reject(new Error(`fetch-emacs.sh exited with ${code}`))));
   });
-  assert.equal(existsSync(join(project, "vendor/wasmacs/artifacts/emacs-browser-atomics-pdump/temacs.wasm")), true);
-  pass("the ZIP unpacks to a project with run.sh; fetch-emacs.sh brought the browser's Emacs into vendor/");
+  const vendoredEmacs = join(project, "vendor/wasmacs/artifacts/emacs-browser-atomics-pdump");
+  assert.equal(existsSync(join(vendoredEmacs, "temacs.wasm")), true);
+  // The core package: Emacs Lisp and its library, not the 146 MB of the editor.
+  assert.equal(existsSync(join(vendoredEmacs, "temacs.core.data")), true);
+  assert.equal(existsSync(join(vendoredEmacs, "temacs.data.parts")), false);
+  const vendorBytes = (await readdir(join(project, "vendor"), { recursive: true, withFileTypes: true }))
+    .filter((entry) => entry.isFile()).reduce((sum, entry) => sum + statSync(join(entry.parentPath, entry.name)).size, 0);
+  assert.equal(vendorBytes < 50e6, true, `vendor/ has ${vendorBytes} bytes`);
+  pass(`the ZIP unpacks to a project with run.sh; fetch-emacs.sh brought the browser's Emacs into vendor/ (${(vendorBytes / 1e6).toFixed(1)} MB)`);
 
   // Nothing but the project's own server from here on.
   server.close();
@@ -126,6 +133,9 @@ try {
   await standalone.pageUntil("/2 books, 1 read/.test(document.querySelector('.status').textContent)", "the native server updates");
   const resources = await js("performance.getEntriesByType('resource').map((entry) => new URL(entry.name).origin).filter((value, index, all) => all.indexOf(value) === index)");
   assert.deepEqual(resources, [nativeOrigin]);
+  // The page's Emacs reads its Lisp files one by one from the project's
+  // server, which sends the parts of the package it asks for.
+  assert.equal(await js("window.elispReact.files"), "on demand");
   const database = await readFile(join(project, ".data/app.db"));
   assert.equal(database.subarray(0, 15).toString("latin1"), "SQLite format 3");
   pass(`unpacked and started with run.sh, the application runs with nothing else: "${await standalone.status()}", data in .data/app.db (${database.length} bytes)`);

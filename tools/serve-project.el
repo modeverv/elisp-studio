@@ -19,7 +19,9 @@
 ;; DIRECTORY/vendor/ holds a copy (fetch-emacs.sh in a downloaded project
 ;; puts one there), this server serves that instead: index.html is sent with
 ;; its links to the elisp-react and wasmacs sites turned into links to
-;; /vendor/, and nothing is fetched from the internet.
+;; /vendor/, and nothing is fetched from the internet.  That Emacs reads its
+;; Lisp files one by one, each as a part of one large file: a request with
+;; a Range header gets that part.
 ;;
 ;; It listens on 127.0.0.1.  A request body is data for server.el; this
 ;; file evaluates nothing it receives.  Requests to /api/ that a page of
@@ -142,14 +144,20 @@ only for names with a link in them.)"
   "Send a response on PROCESS: STATUS (\"200 OK\"), TYPE, BODY (bytes).
 HEADERS is a list of (NAME . VALUE).  The connection stays open for the
 next request if the visitor asked for that, unless CLOSE.  With FILE, the
-body is that file's content, read and sent piece by piece."
+body is that file's content, read and sent piece by piece; (FILE START END)
+is the part of it from byte START up to END."
   ;; An upload that the handler did not keep goes away with the answer.
   (serve-project--forget-upload process)
   ;; An answer that comes later may find that the visitor has left.
   (when (process-live-p process)
     (let* ((keep (and (not close) (process-get process :keep)))
            (bare (string-prefix-p "304" status))
-           (size (if file (file-attribute-size (file-attributes file)) (string-bytes body))))
+           (from (if (consp file) (nth 1 file) 0))
+           (to (and (consp file) (nth 2 file)))
+           (file (if (consp file) (car file) file))
+           (size (cond (to (- to from))
+                       (file (file-attribute-size (file-attributes file)))
+                       (t (string-bytes body)))))
       (process-send-string
        process
        (concat (encode-coding-string
@@ -173,7 +181,7 @@ body is that file's content, read and sent piece by piece."
              process
              (with-temp-buffer
                (set-buffer-multibyte nil)
-               (insert-file-contents-literally file nil sent (min size (+ sent serve-project--piece)))
+               (insert-file-contents-literally file nil (+ from sent) (+ from (min size (+ sent serve-project--piece))))
                (buffer-string)))
             (setq sent (+ sent serve-project--piece)))))
       (when (and serve-project-log (process-get process :method))
@@ -254,6 +262,21 @@ COMING is how many bytes of its body have not arrived yet."
   (process-put process :head nil)
   (process-put process :linger (and coming (<= coming serve-project-max-upload) coming))
   (serve-project--respond process status "text/plain" (substring status 4) nil t))
+
+(defun serve-project--range (header size)
+  "The part of a file of SIZE bytes that the Range HEADER asks for.
+\(START END), END not included; `none' if the file has no such part; nil
+without a header, or with one that is not one range of bytes (HTTP allows
+the whole file as the answer then).  The browser's Emacs reads its Lisp
+files this way: each one is a part of one large file."
+  (when (and header (string-match "\\`bytes=\\([0-9]\\{1,15\\}\\)-\\([0-9]\\{0,15\\}\\)\\'" header))
+    (let ((start (string-to-number (match-string 1 header)))
+          (end (if (string-empty-p (match-string 2 header))
+                   (1- size)
+                 (string-to-number (match-string 2 header)))))
+      (cond ((>= start size) 'none)
+            ((< end start) nil)
+            (t (list start (1+ (min end (1- size)))))))))
 
 (defun serve-project--vendored-p ()
   "Non-nil if the project has its own copy of the browser's Emacs."
@@ -360,10 +383,23 @@ that name."
                  (headers (list (cons "ETag" tag) '("Cache-Control" . "no-cache"))))
             (if (equal (cdr (assoc "if-none-match" request-headers)) tag)
                 (serve-project--respond process "304 Not Modified" nil "" headers)
-              (let ((type (or (cdr (assoc (file-name-extension file) serve-project--types))
-                              "application/octet-stream")))
-                (if (and (not page) (> (file-attribute-size attributes) serve-project--piece))
-                    (serve-project--respond process "200 OK" type "" headers nil file)
+              (let* ((type (or (cdr (assoc (file-name-extension file) serve-project--types))
+                               "application/octet-stream"))
+                     (size (file-attribute-size attributes))
+                     ;; A page is rewritten on its way out: it has no parts.
+                     (range (and (not page) (serve-project--range (cdr (assoc "range" request-headers)) size))))
+                (cond
+                 ((eq range 'none)
+                  (serve-project--respond process "416 Range Not Satisfiable" "text/plain" "no such part"
+                                          (cons (cons "Content-Range" (format "bytes */%d" size)) headers)))
+                 (range
+                  (serve-project--respond
+                   process "206 Partial Content" type ""
+                   (cons (cons "Content-Range" (format "bytes %d-%d/%d" (car range) (1- (cadr range)) size)) headers)
+                   nil (cons file range)))
+                 ((and (not page) (> size serve-project--piece))
+                  (serve-project--respond process "200 OK" type "" headers nil file))
+                 (t
                   (serve-project--respond
                    process "200 OK" type
                    (let ((bytes (with-temp-buffer
@@ -373,7 +409,7 @@ that name."
                      (if page
                          (encode-coding-string (serve-project--page (decode-coding-string bytes 'utf-8)) 'utf-8)
                        bytes))
-                   headers)))))))))))
+                   headers))))))))))))
 
 (defun serve-project--begin (process request headers body &optional upload)
   "Answer the REQUEST (METHOD TARGET VERSION) that PROCESS has sent completely."
