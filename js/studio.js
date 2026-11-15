@@ -490,6 +490,7 @@ async function startPreview(project, why) {
     if (mine !== generation) return;
     startedOnce = true;
     current.app = app;
+    connectAddress(current);
     for (const source of built.sources) if (source.path) current.sources.set(source.path, source.name);
     for (const path of built.styles) {
       current.styles.set(path, frame.contentDocument.querySelector(`style[data-studio-file="${CSS.escape(path)}"]`));
@@ -510,6 +511,20 @@ async function startPreview(project, why) {
            `${error.log ? `${error.log}\n\n` : ""}${error.message || error}`);
   }
 }
+
+// The address bar: the application's address, which elisp-react keeps in
+// memory in the preview, followed and set from here.
+const addressField = document.querySelector("#address");
+function connectAddress(current) {
+  const show = (described) => { if (preview === current && described) addressField.value = described.href; };
+  current.frame.contentDocument.addEventListener("elisp-react:location", (event) => show(event.detail));
+  show(current.app.location?.current);
+}
+document.querySelector("#back").addEventListener("click", () => preview?.app?.location?.go(-1));
+document.querySelector("#forward").addEventListener("click", () => preview?.app?.location?.go(1));
+addressField.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") preview?.app?.location?.navigate(addressField.value.trim() || "/");
+});
 
 // The editor has NEXT; the application has `files`.  Bring it up to date.
 async function applyProject(next) {

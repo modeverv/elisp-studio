@@ -28,6 +28,10 @@
       .pane h2 { margin: 0; padding: 3px 12px; font-size: 11px; font-weight: normal; color: #8a8f98;
                  background: #181b21; flex: none; }
       iframe { flex: 1; width: 100%; border: 0; background: #16181d; }
+      #address-bar { display: flex; gap: 4px; padding: 3px 8px; background: #181b21; flex: none; }
+      #address-bar button { font: inherit; padding: 0 8px; border: 0; border-radius: 3px; background: #2a2d34; color: #d7d9de; cursor: pointer; }
+      #address { flex: 1; min-width: 0; font: 12px/1.6 monospace; padding: 1px 6px; border: 1px solid #2c3038;
+                 border-radius: 3px; background: #111318; color: #d7d9de; }
       #error { display: none; margin: 0; padding: 8px 12px; max-height: 30%; overflow: auto; flex: none;
                background: #4a1212; color: #fff; font: 12px/1.4 monospace; white-space: pre-wrap; }
       #error.shown { display: block; }
@@ -51,6 +55,14 @@
       </section>
       <section class="pane">
         <h2>Your application</h2>
+        <!-- The application's address: the preview has none of its own
+             (an srcdoc frame), so elisp-react keeps one in memory. -->
+        <div id="address-bar">
+          <button id="back" type="button" title="Back" aria-label="Back">←</button>
+          <button id="forward" type="button" title="Forward" aria-label="Forward">→</button>
+          <input id="address" value="/" spellcheck="false" autocomplete="off" aria-label="The application's address"
+                 title="The application's address: type one and press Enter">
+        </div>
         <div id="preview-slot" style="flex:1;display:flex;min-height:0"></div>
         <pre id="error"></pre>
       </section>
