@@ -857,6 +857,10 @@ const RUNTIME_FILES = [
   ["server/deploy/Caddyfile", "tools/project/deploy/Caddyfile", false],
   ["server/deploy/nginx.conf", "tools/project/deploy/nginx.conf", false],
   ["server/deploy/app.service", "tools/project/deploy/app.service", false],
+  ["Dockerfile", "tools/project/Dockerfile", false],
+  ["docker-compose.yml", "tools/project/docker-compose.yml", false],
+  [".dockerignore", "tools/project/dockerignore", false],
+  ["server/deploy/docker-start.sh", "tools/project/deploy/docker-start.sh", true],
 ];
 
 async function projectZip() {

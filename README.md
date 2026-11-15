@@ -315,6 +315,37 @@ Tried with Caddy 2.11 (HTTPS with HTTP/2) and nginx 1.30 in front, with the ship
 
 What is not there: streaming answers and WebSockets, functions for tokens ("Tokens" above), forms that upload (`multipart/form-data`; a page sends the file itself), and, when Emacs sends the files itself, ranges of a file that a handler sends (a video among the uploaded files cannot be skipped through then; with `PROXY_SENDS_FILES=yes` the proxy sends it and its parts). Nobody has attacked this server in earnest: it is a few hundred lines of Emacs Lisp behind a proxy, for applications among friends.
 
+### With Docker
+
+The download also has a `Dockerfile` and a `docker-compose.yml`. The container has the following:
+
+- Ubuntu 24.04 with its GNU Emacs 29.3
+- Caddy, with the shipped `Caddyfile`, in front of `run.sh`
+
+They share the container because the server listens on 127.0.0.1 only.
+
+```sh
+docker compose up -d --build                                                  # http://localhost:8080/
+DOMAIN=example.com HTTP_PORT=80 HTTPS_PORT=443 docker compose up -d --build   # https://example.com/, Caddy gets the certificate
+```
+
+Inside, four Emacs processes run as a user who can write `.data/` and nothing else. `.data/` and Caddy's certificates are volumes, so they outlive the container.
+
+- `PUBLIC_ORIGIN` is `https://DOMAIN`, or `http://localhost:HTTP_PORT` without a domain. Set it when visitors come by another address.
+- `CORS_ORIGINS` is passed on.
+- The `Caddyfile` takes its address from `SITE_ADDRESS` (default `example.com`), which the container sets.
+- `server/deploy/docker-start.sh` starts Caddy and `run.sh`, and ends the container when either one ends.
+
+`npm run test:docker` builds the template this way, also in CI, and checks the following:
+
+- the page and `/api/`
+- a file that Caddy sends for Emacs
+- the refusals
+- the data after a restart, and after the container is made again
+- HTTPS with `DOMAIN=localhost`
+
+Parens, a larger application with `server.el`, was run the same way by hand.
+
 ### How fast is that server?
 
 It is one Emacs with one thread, working like Node.js: connections wait in the operating system, Emacs takes one request, runs the handler to its end, answers, takes the next. `server.el` and the server itself are byte-compiled when the server starts. Measured with ApacheBench on an Apple M4 Max, Emacs 31.1, 10 connections at a time (`ab -n 10000 -c 10`; with `-k` the connections are kept, as a proxy keeps them):
@@ -368,6 +399,7 @@ Deferring itself costs nothing to speak of: a handler that defers and answers at
   .gitignore          what the tools write here and git should not keep (.data/, vendor/wasmacs/, ...)
   test/run.sh         the checks: every .el file compiles without a warning, then test/*-test.el (ERT)
   .github/workflows/test.yml    the same at every push to GitHub
+  Dockerfile, docker-compose.yml, .dockerignore    docker compose up: the same in a container, with Caddy in front ("With Docker")
   ```
 
   After `./run.sh`, Emacs serves the page and answers its requests. The Emacs that runs the page's `app.el` in the browser is downloaded by the page from the wasmacs site; after `./fetch-emacs.sh` it is served from `vendor/` by the same Emacs instead, and nothing needs the internet any more.
