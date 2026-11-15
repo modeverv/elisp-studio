@@ -49,6 +49,8 @@ What happens when a file is saved:
 | `index.html` | The application starts again (its state is reset). |
 | `server.el` | Evaluated in the running server, which keeps its data. |
 
+Files saved together (a change that spans two files) are loaded in the order `index.html` loads them, which is the order they depend on each other in. When one fails, the files after it are not loaded; the report names them, and they are loaded with the next change.
+
 In Emacs, in a file of the project:
 
 | Key | |

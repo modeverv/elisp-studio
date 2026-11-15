@@ -553,6 +553,7 @@ async function applyProject(next) {
     savedAgain.delete(path);
   }
   const first = files.size === 0;
+  const before = files;
   files = next;
   // The server first: the application asks it as soon as it starts.
   let serverNews = null;
@@ -575,7 +576,11 @@ async function applyProject(next) {
   }
   const done = [];
   const logs = [];
-  for (const path of changed) {
+  // Stylesheets first; then the Lisp files in the order index.html loads
+  // them, which is the order they depend on each other in.
+  const order = [...preview.sources.keys()];
+  const sources = changed.filter((path) => preview.sources.has(path)).sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  for (const path of [...changed.filter((path) => preview.styles.has(path)), ...sources]) {
     if (preview.styles.has(path)) {
       preview.styles.get(path).textContent = next.get(path);
       done.push(path);
@@ -591,8 +596,15 @@ async function applyProject(next) {
           return;
         }
         const text = `${error.symbol ? `${error.symbol}: ` : ""}${error.message}`;
+        // This file and the ones after it were not loaded: the studio keeps
+        // their old text, so that the next change loads them again.
+        const left = sources.slice(sources.indexOf(path));
+        for (const each of left) {
+          if (before.has(each)) files.set(each, before.get(each)); else files.delete(each);
+        }
+        const skipped = left.slice(1);
         showError(text);
-        report("error", `${path}: not applied (the application runs on with the old code)`,
+        report("error", `${path}: not applied (the application runs on with the old code)${skipped.length ? `; not loaded after it: ${skipped.join(", ")}` : ""}`,
                `${error.log ? `${editorLog(error.log, error, path)}\n\n` : ""}${text}`);
         return;
       }

@@ -171,6 +171,24 @@ try {
   }
   pass("the application fetches and shows the project's own files (data.json, an image); server.el and hidden files are not served");
 
+  // Two files changed at once load in index.html's order (lib.el before
+  // app.el, although "app.el" sorts first); a failure keeps the files after
+  // it for the next change.
+  await writeFile(join(project, "lib.el"), ";;; -*- lexical-binding: t; -*-\n(defun order-word () \"one\")\n");
+  await writeFile(join(project, "app.el"), ";;; -*- lexical-binding: t; -*-\n(react-mount (jsx (p (:class \"order\") (order-word))) \"#app\")\n");
+  await edit("index.html", (html) => html.replace('<script type="text/emacs-lisp" src="app.el">', '<script type="text/emacs-lisp" src="lib.el"></script>\n<script type="text/emacs-lisp" src="app.el">'));
+  await appUntil("document.querySelector('.order')?.textContent === 'one'", "the application starts with lib.el and app.el");
+  await writeFile(join(project, "lib.el"), ";;; -*- lexical-binding: t; -*-\n(defun order-word () \"one\")\n(defun order-word-2 () \"two\")\n");
+  await writeFile(join(project, "app.el"), ";;; -*- lexical-binding: t; -*-\n(react-mount (jsx (p (:class \"order\") (order-word-2))) \"#app\")\n");
+  await appUntil("document.querySelector('.order')?.textContent === 'two'", "both changes are applied, lib.el first");
+  // lib.el broken and app.el changed: app.el waits; fixing lib.el alone brings it in.
+  await writeFile(join(project, "lib.el"), ";;; -*- lexical-binding: t; -*-\n(defun order-word-3 () \"three\"\n");
+  await writeFile(join(project, "app.el"), ";;; -*- lexical-binding: t; -*-\n(react-mount (jsx (p (:class \"order\") (order-word-3))) \"#app\")\n");
+  await until("/lib.el: not applied .*; not loaded after it: app.el/.test(document.querySelector('#status').textContent)", "the failure names what was not loaded");
+  await writeFile(join(project, "lib.el"), ";;; -*- lexical-binding: t; -*-\n(defun order-word-3 () \"three\")\n");
+  await appUntil("document.querySelector('.order')?.textContent === 'three'", "fixing lib.el loads app.el too");
+  pass("files changed together load in index.html's order; after a failure the files not loaded are loaded with the next change");
+
   // No isolation on this machine: there is no editor in the page.
   assert.deepEqual(await js("[window.crossOriginIsolated, document.querySelector('#preview').contentWindow.crossOriginIsolated]"), [false, false]);
   assert.equal((await fetch(`${origin}/elisp-studio/`)).headers.get("cross-origin-embedder-policy"), null);
