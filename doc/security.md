@@ -50,7 +50,7 @@ The sample server of elisp-react (`examples/server/server.el`) had findings 1, 2
 - **Injection.** ZAP's active scan (120 rules passed, none failed): SQL injection, path traversal, remote file inclusion, OS command injection, server-side code and template injection, XXE, and the rest of its list. SQL in queries and bodies ends up as text in a parameter. Uploaded names such as `../../server.el` and ZAP's payloads became plain names inside `.data/files/`.
 - **The Lisp reader.** 600 KB of open parentheses, 100,000 levels of nesting, circular structures, byte-code objects, `#.` and backquote forms: read as data or refused, never evaluated, no crash. (The cost in memory is finding 2.)
 - **Sessions.** A forged or malformed session name is nobody; signing in while sending a session name of one's own choice gives a new one (no fixation); the database holds only hashes of session names; signing out and signing out everywhere work across workers.
-- **Other sites.** A POST with a foreign `Origin` (also `null`, look-alike and wrong-case origins) is refused; there are no CORS headers, so no page of another site can read an answer.
+- **Other sites.** A POST with a foreign `Origin` (also `null`, look-alike and wrong-case origins) is refused; there are no CORS headers, so no page of another site can read an answer. (Since then `CORS_ORIGINS` can name sites whose pages may: their requests come without cookies unless `CORS_CREDENTIALS=yes`. The list is exact origins, no patterns, and empty unless set.)
 - **Header injection.** A line break in a header value, a cookie or a download's file name does not reach the response.
 
 ## What is left, knowingly

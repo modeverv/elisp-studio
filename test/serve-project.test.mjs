@@ -90,6 +90,54 @@ test("server.el's headers replace the server's own: on /api/ answers, and on fil
   }
 });
 
+test("CORS_ORIGINS: pages of the named sites use /api/, without cookies unless CORS_CREDENTIALS", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "serve-project-cors-"));
+  await cp(join(root, "template"), directory, { recursive: true });
+  await writeFile(join(directory, "server.el"), `;;; -*- lexical-binding: t; -*-
+(defun app-server-handle (method path body)
+  (pcase (list method path)
+    ('("GET" "/api/who") (list :cookie (app-server-header "cookie") :auth (app-server-header "authorization")))
+    ('("POST" "/api/echo") (app-server-data body))
+    (_ (signal 'file-missing (list "No such API" path)))))
+`);
+  const front = "https://front.example.test";
+  const crossSite = { Origin: front, "Sec-Fetch-Site": "cross-site" };
+  for (const credentials of [false, true]) {
+    const server = await startServer(directory, { CORS_ORIGINS: `${front}/, https://other-front.example.test`,
+                                                  ...(credentials ? { CORS_CREDENTIALS: "yes" } : {}) });
+    try {
+      // The preflight is answered by the server itself.
+      const preflight = await fetch(`${server.origin}/api/echo`, { method: "OPTIONS", headers: {
+        ...crossSite, "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type, authorization" } });
+      assert.equal(preflight.status, 204);
+      assert.equal(preflight.headers.get("access-control-allow-origin"), front);
+      assert.equal(preflight.headers.get("access-control-allow-methods"), "GET, POST, PUT, PATCH, DELETE");
+      assert.equal(preflight.headers.get("access-control-allow-headers"), "content-type, authorization");
+      assert.equal(preflight.headers.get("access-control-allow-credentials"), credentials ? "true" : null);
+      assert.equal(preflight.headers.get("content-length"), null);
+      // The request reaches server.el; the answer may be read by that page.
+      const posted = await fetch(`${server.origin}/api/echo`, { method: "POST", headers: crossSite, body: '"hello"' });
+      assert.deepEqual([posted.status, await posted.text()], [200, '"hello"']);
+      assert.equal(posted.headers.get("access-control-allow-origin"), front);
+      assert.equal(posted.headers.get("vary"), "Origin");
+      // Cookies only with CORS_CREDENTIALS; a token in a header always.
+      const who = await fetch(`${server.origin}/api/who`, { headers: { ...crossSite, Cookie: "session=s1", Authorization: "Bearer t1" } });
+      assert.equal(await who.text(), credentials ? '(:cookie "session=s1" :auth "Bearer t1")' : '(:cookie nil :auth "Bearer t1")');
+      // Another site is refused as ever, its preflight too; the server's
+      // own pages get no CORS headers.
+      const other = { Origin: "https://evil.example.test", "Sec-Fetch-Site": "cross-site" };
+      assert.equal((await fetch(`${server.origin}/api/who`, { headers: other })).status, 403);
+      assert.equal((await fetch(`${server.origin}/api/echo`, { method: "OPTIONS", headers: { ...other, "Access-Control-Request-Method": "POST" } })).status, 403);
+      assert.equal((await fetch(`${server.origin}/api/who`, { headers: { Origin: server.origin } })).headers.get("access-control-allow-origin"), null);
+      // The project's files are not for other sites.
+      assert.equal((await fetch(`${server.origin}/`, { headers: crossSite })).headers.get("access-control-allow-origin"), null);
+    } finally {
+      await server.stop();
+    }
+  }
+  await rm(directory, { recursive: true, force: true });
+});
+
 test("the template project runs under a native Emacs: files, server.el, kept data", async () => {
   const directory = await mkdtemp(join(tmpdir(), "elisp-studio-project-"));
   await cp(join(root, "template"), directory, { recursive: true });

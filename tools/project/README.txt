@@ -62,6 +62,14 @@ PROXY_SENDS_FILES with those configurations only.  What server.el keeps
 in a Lisp variable is known to one of the four processes; WORKERS=1 for
 an application that needs that.
 
+Pages of other sites may not use /api/, unless they are named:
+
+  CORS_ORIGINS=https://front.example.net ./run.sh
+
+Their requests then reach server.el, without the visitor's cookies
+(CORS_CREDENTIALS=yes lets those through as well: only for a site you
+trust as much as this one).
+
 Start the server with run.sh, not with "emacs --batch" directly: run.sh
 makes Emacs ignore the signal that a visitor who hangs up in the middle of
 an answer would otherwise end it with.

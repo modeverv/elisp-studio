@@ -231,7 +231,7 @@ A session is the server's note of who signed in. A JWT is the other arrangement:
 
 For the application's own sign-in the session is the better fit. Signing out takes effect at once, on every device if wanted; a signed token stays good until it runs out, unless the server keeps a list of the ones it took back, which is a session again. What a token saves is a store shared by the workers, and they have one. A token earns its place when another program must check who someone is without asking this server; with HS256 that program needs the same secret.
 
-Whoever writes it: accept one algorithm, never the one the token names; check `exp`; compare the two signatures without stopping at the first difference (compare their `secure-hash`es); keep the secret in `.data/`, which is never served, or in the environment, the same for all workers (changing it ends every token). A token does not open the API to pages of other sites: their requests are refused whatever they carry, a CORS preflight included (403).
+Whoever writes it: accept one algorithm, never the one the token names; check `exp`; compare the two signatures without stopping at the first difference (compare their `secure-hash`es); keep the secret in `.data/`, which is never served, or in the environment, the same for all workers (changing it ends every token). A token alone does not open the API to pages of other sites: their requests are refused whatever they carry, a CORS preflight included (403), unless `CORS_ORIGINS` names their site (below).
 
 ### Passwords
 
@@ -272,6 +272,7 @@ The download brings the configurations in `server/deploy/`: a `Caddyfile`, an `n
 | | |
 |---|---|
 | The public origin | Requests to `/api/` from pages of other sites are refused; `PUBLIC_ORIGIN` says which pages are the application's own. |
+| Pages of other sites | `CORS_ORIGINS=https://front.example.net` (several: separated by commas) names sites whose pages may use `/api/`: a front end on GitHub Pages, or on `www.example.com` for an API on `api.example.com`. The server answers their preflights and lets their pages read the answers (`Access-Control-Allow-Origin`, `Vary: Origin`). Their requests reach `server.el` without cookies, so such a page cannot act with a visitor's session; a token in `Authorization` passes. `CORS_CREDENTIALS=yes` lets cookies through (they then have to be `SameSite=None` and `Secure`): only for sites trusted as much as the application. |
 | Who the visitor is | `(app-server-header "x-forwarded-for")` and `"x-forwarded-proto"` are the proxy's word, which can be believed because only this machine reaches the server. Both shipped configurations overwrite what a visitor claims in those headers. |
 | Cookies, sign-in | See above. Requests from other sites cannot use them: the origin check, and `SameSite=Lax`. |
 | Kept connections | The proxy's connections stay open between requests, and requests sent ahead are answered in order. |
@@ -292,7 +293,7 @@ Tried with Caddy 2.11 (HTTPS with HTTP/2) and nginx 1.30 in front, with the ship
 
 [doc/security.md](doc/security.md) is the record of a security check of this server (OWASP ZAP, about a hundred hand-made requests, an independent reading of the code): two serious problems and nine lesser ones were found and fixed, and it says what was left as it is. In short: a request could make the server open an SSH connection to a machine of the sender's choice, and a visitor could fill its memory; neither is possible any more, and a test fails if either comes back.
 
-What is not there: streaming answers and WebSockets, functions for tokens and answers to pages of other sites ("Tokens" above), forms that upload (`multipart/form-data`; a page sends the file itself), and, when Emacs sends the files itself, ranges of a file that a handler sends (a video among the uploaded files cannot be skipped through then; with `PROXY_SENDS_FILES=yes` the proxy sends it and its parts). Nobody has attacked this server in earnest: it is a few hundred lines of Emacs Lisp behind a proxy, for applications among friends.
+What is not there: streaming answers and WebSockets, functions for tokens ("Tokens" above), forms that upload (`multipart/form-data`; a page sends the file itself), and, when Emacs sends the files itself, ranges of a file that a handler sends (a video among the uploaded files cannot be skipped through then; with `PROXY_SENDS_FILES=yes` the proxy sends it and its parts). Nobody has attacked this server in earnest: it is a few hundred lines of Emacs Lisp behind a proxy, for applications among friends.
 
 ### How fast is that server?
 
