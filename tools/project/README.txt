@@ -26,15 +26,20 @@ the page downloads (about 5 MB the first time; the browser keeps it).
 By default it comes from https://modeverv.github.io/wasmacs/.  To serve it
 from here instead, so that nothing needs the internet:
 
-  ./fetch-emacs.sh           downloads it into vendor/ (40 MB, needs curl)
-  ./fetch-emacs.sh --full    with all of Emacs's Lisp (165 MB)
+  ./fetch-emacs.sh    downloads it into vendor/ (170 MB, needs curl)
 
-The first has Emacs Lisp and its library (cl-lib, seq, json, url, the
-calendar, the charsets) and not the editor's own libraries (Org, Calc,
-Gnus, the programming modes, source files).  If app.el requires one of
-those, the page says "Cannot open load file": take --full.  A visitor
-downloads 5 MB either way, and of Emacs's Lisp only the files the page
-reads.
+That is what lies on this machine, not what a visitor downloads: a
+visitor gets 5 MB (Emacs itself, of which fetch-emacs.sh keeps compressed
+copies that the server sends) and then only the Lisp files the page
+reads, each as a part of one large file.  vendor/ holds all of Emacs's
+Lisp, as the studio does, so what ran in the studio runs here.
+
+  ./fetch-emacs.sh --core    a smaller copy (45 MB), for a short disk
+
+--core leaves out the editor's own libraries (Org, Calc, Gnus, the
+programming modes, source files).  If app.el requires one of those, the
+page then says "Cannot open load file" here although it ran in the
+studio.
 
 Without a server.el the application is a static site: index.html, app.el
 and style.css on any web server are enough.

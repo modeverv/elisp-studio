@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { gunzipSync, gzipSync } from "node:zlib";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const freePort = () => new Promise((resolve) => {
@@ -136,6 +137,88 @@ test("a part of a file: the browser's Emacs reads its Lisp files as ranges of on
     const kept = await raw(server.port, `GET /small.txt HTTP/1.1\r\n${host}\r\nRange: bytes=0-1\r\n\r\n`
       + `GET /small.txt HTTP/1.1\r\n${host}\r\nRange: bytes=8-9\r\nConnection: close\r\n\r\n`);
     assert.deepEqual(kept.received.match(/HTTP\/1\.1 206|\r\n\r\n(01|89)/g), ["HTTP/1.1 206", "\r\n\r\n01", "HTTP/1.1 206", "\r\n\r\n89"]);
+  } finally {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a compressed copy next to a file is sent to a browser that takes gzip", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "elisp-studio-packed-"));
+  await cp(join(root, "template"), directory, { recursive: true });
+  // As fetch-emacs.sh leaves the browser's Emacs: NAME and NAME.gz.
+  const big = Buffer.from(Array.from({ length: 60000 }, (_, i) => `line ${i} of a file that compresses well\n`).join(""));
+  assert.equal(big.length > 1024 * 1024, true);
+  await writeFile(join(directory, "big.pdmp"), big);
+  await writeFile(join(directory, "big.pdmp.gz"), gzipSync(big));
+  await writeFile(join(directory, "small.json"), '{"a":1}');
+  await writeFile(join(directory, "small.json.gz"), gzipSync('{"a":1}'));
+  await writeFile(join(directory, "alone.txt"), "no copy");
+  const server = await startServer(directory);
+  try {
+    // Node's fetch takes gzip and unpacks it, like a browser; raw() shows
+    // what went over the wire.
+    const get = async (path, headers = {}, method = "GET") => {
+      const response = await fetch(`${server.origin}${path}`, { method, headers });
+      return { status: response.status, encoding: response.headers.get("content-encoding"), vary: response.headers.get("vary"),
+               length: Number(response.headers.get("content-length")), tag: response.headers.get("etag"),
+               type: response.headers.get("content-type"), body: Buffer.from(await response.arrayBuffer()) };
+    };
+    const packed = await get("/big.pdmp");
+    assert.deepEqual([packed.status, packed.encoding, packed.vary, packed.type], [200, "gzip", "Accept-Encoding", "application/octet-stream"]);
+    assert.equal(packed.body.equals(big), true);
+    assert.equal(packed.length, gzipSync(big).length);
+    assert.equal(packed.length < big.length / 5, true);
+    const small = await get("/small.json");
+    assert.deepEqual([small.encoding, small.type, small.body.toString()], ["gzip", "application/json", '{"a":1}']);
+    const head = await get("/big.pdmp", {}, "HEAD");
+    assert.deepEqual([head.status, head.encoding, head.length, head.body.length], [200, "gzip", packed.length, 0]);
+
+    // Who does not take gzip gets the file; either way a cache is told
+    // that the answer depends on that.
+    for (const accept of ["identity", "br", "gzip;q=0, br"]) {
+      const plain = await get("/big.pdmp", { "Accept-Encoding": accept });
+      assert.deepEqual([plain.status, plain.encoding, plain.vary, plain.length], [200, null, "Accept-Encoding", big.length], accept);
+      assert.equal(plain.body.equals(big), true);
+      assert.notEqual(plain.tag, packed.tag);
+    }
+    // The two have different validators, and each is found unchanged.
+    assert.equal((await get("/big.pdmp", { "If-None-Match": packed.tag })).status, 304);
+    assert.equal((await get("/big.pdmp", { "If-None-Match": packed.tag, "Accept-Encoding": "identity" })).status, 200);
+    // A part is a part of the file, not of the copy.
+    const part = await get("/big.pdmp", { Range: "bytes=1000000-1000099" });
+    assert.deepEqual([part.status, part.encoding], [206, null]);
+    assert.deepEqual(part.body, big.subarray(1000000, 1000100));
+    // A file without a copy is as before; the copy itself is a file like another.
+    const alone = await get("/alone.txt");
+    assert.deepEqual([alone.encoding, alone.vary, alone.body.toString()], [null, null, "no copy"]);
+    const copy = await get("/small.json.gz", { "Accept-Encoding": "identity" });
+    assert.deepEqual([copy.status, copy.encoding], [200, null]);
+    assert.deepEqual(gunzipSync(copy.body).toString(), '{"a":1}');
+
+    // A copy that is older than its file is not the file's any more.
+    await writeFile(join(directory, "small.json"), '{"a":2}');
+    const { utimes } = await import("node:fs/promises");
+    await utimes(join(directory, "small.json.gz"), new Date(Date.now() - 60000), new Date(Date.now() - 60000));
+    const changed = await get("/small.json");
+    assert.deepEqual([changed.encoding, changed.body.toString()], [null, '{"a":2}']);
+    // A copy is a file of the project or nothing: not a link out of it,
+    // not the copy of something else that happens to have the name.
+    await writeFile(join(directory, "..", "elisp-studio-outside.gz"), gzipSync("outside"));
+    await writeFile(join(directory, "note.txt"), "inside");
+    await symlink(join(directory, "..", "elisp-studio-outside.gz"), join(directory, "note.txt.gz"));
+    const linked = await get("/note.txt");
+    assert.deepEqual([linked.status, linked.encoding, linked.body.toString()], [200, null, "inside"]);
+    await rm(join(directory, "..", "elisp-studio-outside.gz"));
+    await mkdir(join(directory, "sub"));
+    await writeFile(join(directory, "sub/index.html"), "<p>the page of sub</p>");
+    await writeFile(join(directory, "sub.gz"), gzipSync("not that page"));
+    const index = await get("/sub");
+    assert.deepEqual([index.status, index.encoding, index.body.toString()], [200, null, "<p>the page of sub</p>"]);
+    // What is not served has no copy either.
+    await writeFile(join(directory, "server.el.gz"), gzipSync("(secret)"));
+    assert.equal((await get("/server.el")).status, 404);
+    assert.equal((await get("/server.el.gz")).status, 404);
   } finally {
     await server.stop();
     await rm(directory, { recursive: true, force: true });
@@ -941,7 +1024,7 @@ test("a downloaded project runs itself: run.sh, and with vendor/ its own copy of
   }
 });
 
-test("fetch-emacs.sh copies Emacs with its core Lisp, or with all of it, and the licences", async () => {
+test("fetch-emacs.sh copies Emacs with all of its Lisp, or with the core of it, and the licences", async () => {
   // Stand-ins for the two published sites, with small files.
   const site = await mkdtemp(join(tmpdir(), "elisp-studio-site-"));
   const directory = await mkdtemp(join(tmpdir(), "elisp-studio-fetch-"));
@@ -982,30 +1065,41 @@ test("fetch-emacs.sh copies Emacs with its core Lisp, or with all of it, and the
     const copied = (path) => readFile(join(vendor, path), "utf8");
     const emacsFiles = async () => (await readdir(join(vendor, emacs), { recursive: true })).sort();
 
-    // Without an option: the core package, whose index takes the name the
-    // page asks for.  A browser keeps it apart from the whole package.
+    // Every file of Emacs, as the studio has it; and next to the files
+    // that every visitor downloads, a compressed copy for the server.
+    const whole = ["bootstrap-emacs.pdmp", "bootstrap-emacs.pdmp.gz", "temacs.data.parts", "temacs.data.parts/manifest.json",
+      "temacs.data.parts/part-000", "temacs.data.parts/part-001", "temacs.files.json", "temacs.files.json.gz",
+      "temacs.js", "temacs.js.gz", "temacs.wasm", "temacs.wasm.gz"];
     assert.equal(await script(), 0);
-    assert.deepEqual(await emacsFiles(), ["bootstrap-emacs.pdmp", "temacs.core.data", "temacs.files.json", "temacs.js", "temacs.wasm"]);
-    assert.equal(await copied(`${emacs}/temacs.files.json`), '{"files":"core"}\n');
-    assert.equal(await copied(`${emacs}/temacs.core.data`), "core data");
-    assert.equal(await copied("wasmacs/app/eval-build-id.json"), '{"id":"0123abcd-core"}\n');
+    assert.deepEqual(await emacsFiles(), whole);
+    assert.equal(await copied(`${emacs}/temacs.files.json`), '{"files":"all"}\n');
+    assert.equal(await copied(`${emacs}/temacs.data.parts/part-001`), "more data");
+    assert.equal(await copied("wasmacs/app/eval-build-id.json"), '{"id":"0123abcd"}\n');
     assert.equal(await copied("wasmacs/app/src/emacs-eval-worker.js"), "// worker\n");
+    assert.equal(gunzipSync(await readFile(join(vendor, emacs, "bootstrap-emacs.pdmp.gz"))).toString(), "pdmp");
+    assert.equal(gunzipSync(await readFile(join(vendor, emacs, "temacs.files.json.gz"))).toString(), '{"files":"all"}\n');
     assert.equal(await copied("wasmacs/licenses/NOTICE.txt"), "where the source is\n");
     assert.match(await copied("wasmacs/licenses/GPL-3.0-or-later.txt"), /GNU GENERAL PUBLIC LICENSE/);
     assert.match(await copied("elisp-react/LICENSE"), /^MIT License/);
 
-    // --full: every file of Emacs, and nothing left of the other package.
-    assert.equal(await script("--full"), 0);
-    assert.deepEqual(await emacsFiles(), ["bootstrap-emacs.pdmp", "temacs.data.parts", "temacs.data.parts/manifest.json",
-      "temacs.data.parts/part-000", "temacs.data.parts/part-001", "temacs.files.json", "temacs.js", "temacs.wasm"]);
-    assert.equal(await copied(`${emacs}/temacs.files.json`), '{"files":"all"}\n');
-    assert.equal(await copied(`${emacs}/temacs.data.parts/part-001`), "more data");
-    assert.equal(await copied("wasmacs/app/eval-build-id.json"), '{"id":"0123abcd"}\n');
-    // And back; running it twice changes nothing.
-    assert.equal(await script(), 0);
-    assert.equal(await script(), 0);
-    assert.deepEqual(await emacsFiles(), ["bootstrap-emacs.pdmp", "temacs.core.data", "temacs.files.json", "temacs.js", "temacs.wasm"]);
+    // --core: the smaller package, whose index takes the name the page
+    // asks for, and nothing left of the whole one.  A browser keeps the
+    // two apart.
+    const core = ["bootstrap-emacs.pdmp", "bootstrap-emacs.pdmp.gz", "temacs.core.data", "temacs.files.json", "temacs.files.json.gz",
+      "temacs.js", "temacs.js.gz", "temacs.wasm", "temacs.wasm.gz"];
+    assert.equal(await script("--core"), 0);
+    assert.deepEqual(await emacsFiles(), core);
+    assert.equal(await copied(`${emacs}/temacs.files.json`), '{"files":"core"}\n');
+    assert.equal(gunzipSync(await readFile(join(vendor, emacs, "temacs.files.json.gz"))).toString(), '{"files":"core"}\n');
+    assert.equal(await copied(`${emacs}/temacs.core.data`), "core data");
     assert.equal(await copied("wasmacs/app/eval-build-id.json"), '{"id":"0123abcd-core"}\n');
+    // Twice changes nothing; and back to the whole (--full says the same).
+    assert.equal(await script("--core"), 0);
+    assert.deepEqual(await emacsFiles(), core);
+    assert.equal(await copied("wasmacs/app/eval-build-id.json"), '{"id":"0123abcd-core"}\n');
+    assert.equal(await script("--full"), 0);
+    assert.deepEqual(await emacsFiles(), whole);
+    assert.equal(await copied("wasmacs/app/eval-build-id.json"), '{"id":"0123abcd"}\n');
     assert.equal(await script("--everything"), 2);
 
     // A name in the list is a file of that directory or nothing.

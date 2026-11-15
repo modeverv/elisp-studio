@@ -16,7 +16,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -105,13 +105,14 @@ try {
   });
   const vendoredEmacs = join(project, "vendor/wasmacs/artifacts/emacs-browser-atomics-pdump");
   assert.equal(existsSync(join(vendoredEmacs, "temacs.wasm")), true);
-  // The core package: Emacs Lisp and its library, not the 146 MB of the editor.
-  assert.equal(existsSync(join(vendoredEmacs, "temacs.core.data")), true);
-  assert.equal(existsSync(join(vendoredEmacs, "temacs.data.parts")), false);
-  const vendorBytes = (await readdir(join(project, "vendor"), { recursive: true, withFileTypes: true }))
-    .filter((entry) => entry.isFile()).reduce((sum, entry) => sum + statSync(join(entry.parentPath, entry.name)).size, 0);
-  assert.equal(vendorBytes < 50e6, true, `vendor/ has ${vendorBytes} bytes`);
-  pass(`the ZIP unpacks to a project with run.sh; fetch-emacs.sh brought the browser's Emacs into vendor/ (${(vendorBytes / 1e6).toFixed(1)} MB)`);
+  // All of Emacs's Lisp, as the studio has it, and compressed copies of
+  // what every visitor downloads.
+  assert.equal(existsSync(join(vendoredEmacs, "temacs.data.parts/part-000")), true);
+  assert.equal(existsSync(join(vendoredEmacs, "temacs.core.data")), false);
+  const firstVisit = ["temacs.wasm.gz", "bootstrap-emacs.pdmp.gz", "temacs.js.gz", "temacs.files.json.gz"]
+    .reduce((sum, name) => sum + statSync(join(vendoredEmacs, name)).size, 0);
+  assert.equal(firstVisit < 6e6, true, `the compressed copies have ${firstVisit} bytes`);
+  pass(`the ZIP unpacks to a project with run.sh; fetch-emacs.sh brought the browser's Emacs into vendor/ (what a visitor downloads of it at first: ${(firstVisit / 1e6).toFixed(1)} MB)`);
 
   // Nothing but the project's own server from here on.
   server.close();
@@ -136,6 +137,13 @@ try {
   // The page's Emacs reads its Lisp files one by one from the project's
   // server, which sends the parts of the package it asks for.
   assert.equal(await js("window.elispReact.files"), "on demand");
+  // What ran in the studio runs here: a library of the editor that the
+  // page did not need until now is fetched when it is required.
+  assert.equal(await js(`window.elispReact.emacs.eval('(progn (require (quote calc)) (calc-eval "2^100"))')`), "1267650600228229401496703205376");
+  // And Emacs itself came compressed from this server.
+  const pdmp = await fetch(`${nativeOrigin}/vendor/wasmacs/artifacts/emacs-browser-atomics-pdump/bootstrap-emacs.pdmp`, { method: "HEAD" });
+  assert.equal(pdmp.headers.get("content-encoding"), "gzip");
+  assert.equal(Number(pdmp.headers.get("content-length")) < 4e6, true);
   const database = await readFile(join(project, ".data/app.db"));
   assert.equal(database.subarray(0, 15).toString("latin1"), "SQLite format 3");
   pass(`unpacked and started with run.sh, the application runs with nothing else: "${await standalone.status()}", data in .data/app.db (${database.length} bytes)`);

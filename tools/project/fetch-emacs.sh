@@ -3,14 +3,18 @@
 # Put the Emacs that runs in the browser into this directory (vendor/), so
 # that ./run.sh serves everything itself and the page needs no internet.
 #
-#   ./fetch-emacs.sh          about 40 MB: Emacs with the Lisp a program uses
-#   ./fetch-emacs.sh --full   about 165 MB: with all of Emacs's Lisp
+#   ./fetch-emacs.sh          about 170 MB: Emacs with all of its Lisp
+#   ./fetch-emacs.sh --core   about 45 MB: with the language's library only
 #
-# The first is Emacs Lisp and its library (cl-lib, seq, json, url, the
-# calendar, the charsets), without the editor's own libraries: no Org, Calc,
-# Gnus, programming modes or source files.  A program that requires one of
-# those says "Cannot open load file"; take --full then.  Either way a visitor
-# downloads Emacs itself (5 MB) and only the Lisp files the program reads.
+# What lies here is not what a visitor downloads.  A visitor gets Emacs
+# itself (5 MB) and, of Emacs's Lisp, the files the page reads, one by one.
+# So the first is the one to take: it is the Emacs the studio has, and
+# what ran there runs here.
+#
+# --core leaves out the editor's own libraries (Org, Calc, Gnus, the
+# programming modes, source files).  A page that requires one of those
+# then fails with "Cannot open load file", although it ran in the studio.
+# Only for a machine that is short of disk, and after trying the page.
 #
 # Needs bash and curl.  Run it again to update.  What it fetches: GNU Emacs
 # 30.2 as WebAssembly with its Lisp (GPL-3.0-or-later, built by
@@ -22,11 +26,11 @@
 # texts, and its NOTICE.txt says where the source of the build is.  Keep
 # that directory with the copy.
 set -euo pipefail
-package=core
+package=full
 case "${1:-}" in
-  "") ;;
-  --full) package=full ;;
-  *) echo "usage: ./fetch-emacs.sh [--full]" >&2; exit 2 ;;
+  ""|--full) ;;
+  --core) package=core ;;
+  *) echo "usage: ./fetch-emacs.sh [--core]" >&2; exit 2 ;;
 esac
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 wasmacs="${WASMACS_URL:-https://modeverv.github.io/wasmacs/}"
@@ -74,6 +78,18 @@ else
   sed -i.bak 's/\("id": *"[^"]*\)"/\1-core"/' "${vendor}/wasmacs/app/eval-build-id.json"
   rm -f "${vendor}/wasmacs/app/eval-build-id.json.bak"
 fi
+# A compressed copy next to each large file that every visitor downloads:
+# the project's server sends that one to a browser that takes gzip, which
+# makes 16 MB into 5.  (The Lisp files are asked for in parts and stay as
+# they are.)
+if command -v gzip >/dev/null 2>&1; then
+  for name in temacs.wasm bootstrap-emacs.pdmp temacs.js temacs.files.json; do
+    gzip -9 -c "${vendor}/wasmacs/${emacs_dir}/${name}" > "${vendor}/wasmacs/${emacs_dir}/${name}.gz.part"
+    mv "${vendor}/wasmacs/${emacs_dir}/${name}.gz.part" "${vendor}/wasmacs/${emacs_dir}/${name}.gz"
+  done
+else
+  echo "no gzip here: the page will download Emacs uncompressed (16 MB instead of 5) unless a proxy compresses it"
+fi
 # The licences of what was just copied, and where its source is.
 for name in $(cat "${vendor}/wasmacs/licenses/files.txt"); do
   case "${name}" in *[!A-Za-z0-9._-]*|.*) echo "fetch-emacs.sh: not a file name: ${name}" >&2; exit 1 ;; esac
@@ -82,6 +98,7 @@ done
 fetch "${elisp_react}" LICENSE "${vendor}/elisp-react"
 echo "done: $(du -sh "${vendor}" | cut -f1) in vendor/.  ./run.sh now serves it."
 if [ "${package}" = core ]; then
-  echo "This is Emacs Lisp and its library.  For all of Emacs's Lisp (Org, Calc, ...): ./fetch-emacs.sh --full"
+  echo "--core: the editor's libraries (Org, Calc, ...) are not here.  A page that requires one fails here"
+  echo "although it ran in the studio.  ./fetch-emacs.sh without --core brings them."
 fi
 echo "Emacs is free software under the GNU GPL: see vendor/wasmacs/licenses/NOTICE.txt"

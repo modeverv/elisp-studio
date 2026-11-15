@@ -243,7 +243,7 @@ Why not bcrypt or Argon2: Python's standard library has neither, the browser nei
 
 ### Publishing it
 
-The server listens on 127.0.0.1 and speaks plain HTTP. To put the application on the internet, a reverse proxy on the same machine goes in front of it: Caddy or nginx does HTTPS, HTTP/2 and compression, Emacs does the rest. The server is told the address it is published under:
+The server listens on 127.0.0.1 and speaks plain HTTP. To put the application on the internet, a reverse proxy on the same machine goes in front of it: Caddy or nginx does HTTPS, HTTP/2 and compression, Emacs does the rest (the browser's Emacs in `vendor/` comes from Emacs compressed already, see "Getting the project out"). The server is told the address it is published under:
 
 ```sh
 PUBLIC_ORIGIN=https://example.com ./run.sh
@@ -266,7 +266,7 @@ The download brings the configurations in `server/deploy/`: a `Caddyfile` (four 
 | Uploads | Caddy passes a body of any size on as it arrives; for nginx, `client_max_body_size` in the shipped file sets the limit. |
 | Backups | `./backup.sh` copies `.data/` while the server runs; the databases are copied by SQLite itself (`VACUUM INTO`), which gives a whole database also in the middle of a write. |
 
-Tried with Caddy 2.11 (HTTPS with HTTP/2) and nginx 1.30 in front, with the shipped configurations: pages, sign-in, deferred answers, compression and `304` all pass through, a 300 MB file goes up and comes back intact through both (to four workers, which all see it afterwards), and a load of 20,000 requests through Caddy (22,000 per second) had no failures. Six minutes of mixed load (2.5 million requests, among them 370,000 SQLite inserts) ended without an error. In a second run the number of live Lisp objects after a collection was the same after each kind of load as at the start (no leak in Lisp), while the process grew from 59 MB to 105 MB and stayed there. That is fifteen minutes, not weeks. The systemd unit has not been run.
+Tried with Caddy 2.11 (HTTPS with HTTP/2) and nginx 1.30 in front, with the shipped configurations: pages, sign-in, deferred answers, compression and `304` all pass through, a 300 MB file goes up and comes back intact through both (to four workers, which all see it afterwards), and a load of 20,000 requests through Caddy (22,000 per second) had no failures. Six minutes of mixed load (2.5 million requests, among them 370,000 SQLite inserts) ended without an error. In a second run the number of live Lisp objects after a collection was the same after each kind of load as at the start (no leak in Lisp), while the process grew from 59 MB to 105 MB and stayed there. That is fifteen minutes, not weeks. The systemd unit has not been run. The browser's Emacs from `vendor/` was tried through both on 2026-11-15 (Caddy 2.11, nginx stable, plain HTTP): Chrome reads the Lisp files in parts through either, a library required later (`calc`) arrives, and the first visit downloads 4.8 MB (16.9 MB without the compressed copies; 14.3 MB through Caddy and 14.4 MB through nginx).
 
 [doc/security.md](doc/security.md) is the record of a security check of this server (OWASP ZAP, about a hundred hand-made requests, an independent reading of the code): two serious problems and nine lesser ones were found and fixed, and it says what was left as it is. In short: a request could make the server open an SSH connection to a machine of the sender's choice, and a visitor could fill its memory; neither is possible any more, and a test fails if either comes back.
 
@@ -318,7 +318,7 @@ Deferring itself costs nothing to speak of: a handler that defers and answers at
   ```text
   index.html, app.el, style.css, server.el    the project
   run.sh              ./run.sh [PORT]: Emacs becomes the web server of this directory
-  fetch-emacs.sh      optional: download the browser's Emacs into vendor/ (about 40 MB, needs curl)
+  fetch-emacs.sh      optional: download the browser's Emacs into vendor/ (about 170 MB, needs curl)
   backup.sh           copy what the server keeps (.data/) while it runs
   server/             what run.sh loads into Emacs (the HTTP server and app-server.el, with their LICENSE)
   README.txt
@@ -326,16 +326,12 @@ Deferring itself costs nothing to speak of: a handler that defers and answers at
 
   After `./run.sh`, Emacs serves the page and answers its requests. The Emacs that runs the page's `app.el` in the browser is downloaded by the page from the wasmacs site; after `./fetch-emacs.sh` it is served from `vendor/` by the same Emacs instead, and nothing needs the internet any more.
 
-  What a visitor downloads is small either way: Emacs itself (about 5 MB as a web server compresses it) and, of Emacs's Lisp files, the ones the page reads. The page asks the server for the part of the package that holds a file (a range request); the project's server, GitHub Pages, nginx and Caddy answer those. From a server that sends whole files only (Python's `http.server`), the page downloads the package whole, once.
+  What lies in `vendor/` (about 170 MB) is not what a visitor downloads. A visitor gets Emacs itself, about 5 MB, and of Emacs's Lisp files the ones the page reads, one by one (elisp-react's examples: up to seven files, 0.5 MB); the browser keeps all of it for the next visit. Two things in the project's server make that so, with or without a proxy in front:
 
-  What `vendor/` holds is a choice:
+  - **Parts of a file.** The page asks for the part of the package that holds a Lisp file (a range request), and the server sends that part. GitHub Pages, nginx and Caddy do the same for a project without `server.el`. From a server that sends whole files only (Python's `http.server`) the page downloads the whole package once, 146 MB.
+  - **Compressed copies.** `fetch-emacs.sh` keeps a gzip copy next to Emacs itself (`temacs.wasm.gz`, `bootstrap-emacs.pdmp.gz`, ...), and the server sends the copy to a browser that takes gzip. Without them a visitor would download 17 MB, and 14 MB through the shipped Caddy and nginx configurations, which do not compress the largest file.
 
-  | | in `vendor/` | Emacs's Lisp |
-  |---|---|---|
-  | `./fetch-emacs.sh` | about 40 MB | the language and its library: `lisp/` itself, `emacs-lisp/`, `international/`, `url/`, `calendar/`, compiled, and the charset maps |
-  | `./fetch-emacs.sh --full` | about 165 MB | all of it, with source: Org, Calc, Gnus, the programming modes, the input methods |
-
-  The studio itself always has all of it. So an `app.el` that requires one of the editor's libraries (`(require 'calc)`) works in the studio and fails with "Cannot open load file" on a site with the smaller copy: take `--full` there. `cl-lib`, `seq`, `map`, `subr-x`, `json`, `rx`, `generator`, `iso8601`, `url-util` and SQLite are in the smaller one (most of them inside Emacs's dump, where they cost no download at all).
+  `vendor/` holds all of Emacs's Lisp, as the studio does, so what ran in the studio runs on the site: a library that `app.el` requires only in some corner (`(require 'calc)`) is fetched when it is required. `./fetch-emacs.sh --core` copies less (about 45 MB): the language and its library (`cl-lib`, `seq`, `map`, `json`, `rx`, `generator`, `iso8601`, `url-util`, the charsets, compiled), without the editor's own libraries and without source. A page that requires Org, Calc or a programming mode then fails on the site with "Cannot open load file" although it ran in the studio, so that option is for a machine that is short of disk, after trying the page.
 - **`C-c C-p`** in Emacs (`M-x elisp-studio-publish`): `git add`, `git commit` and, if the repository has a remote named `origin`, `git push`, with the git that runs inside Emacs. Pushing to GitHub over HTTPS needs the [wasmacs companion extension](https://github.com/modeverv/wasmacs#network-access) and credentials for the remote (once: `M-x shell`, `cd ~/elisp-studio/app`, `git remote add origin https://github.com/YOU/REPOSITORY.git`). A project without `server.el` pushed to a repository with GitHub Pages enabled is then on the web.
 
 ## Language servers?

@@ -21,7 +21,9 @@
 ;; its links to the elisp-react and wasmacs sites turned into links to
 ;; /vendor/, and nothing is fetched from the internet.  That Emacs reads its
 ;; Lisp files one by one, each as a part of one large file: a request with
-;; a Range header gets that part.
+;; a Range header gets that part.  A file that has a compressed copy next
+;; to it (NAME.gz; fetch-emacs.sh makes them) is sent as that copy to a
+;; browser that takes gzip.
 ;;
 ;; It listens on 127.0.0.1.  A request body is data for server.el; this
 ;; file evaluates nothing it receives.  Requests to /api/ that a page of
@@ -278,6 +280,27 @@ files this way: each one is a part of one large file."
             ((< end start) nil)
             (t (list start (1+ (min end (1- size)))))))))
 
+(defun serve-project--gzip-p (header)
+  "Non-nil if the Accept-Encoding HEADER of a request takes gzip."
+  (and header
+       (let ((case-fold-search t))
+         (and (string-match "\\(?:\\`\\|[ ,\t]\\)gzip\\(?:[ \t]*;[ \t]*q=\\([0-9.]+\\)\\)?[ \t]*\\(?:,\\|\\'\\)" header)
+              (not (and (match-string 1 header)
+                        (zerop (string-to-number (match-string 1 header)))))))))
+
+(defun serve-project--packed (path file)
+  "The gzip-compressed copy of FILE, the file that the URL PATH names, or nil.
+That is the file next to it with .gz added to its name, if this server
+would send that file to whoever asked for it by name, and if it is not
+older than FILE.  fetch-emacs.sh keeps such copies of the browser's Emacs,
+which is 16 MB as it is and 5 MB compressed; the server does not compress
+anything itself."
+  (let ((packed (serve-project--file (concat path ".gz"))))
+    (and packed
+         (equal packed (concat file ".gz"))
+         (not (file-newer-than-file-p file packed))
+         packed)))
+
 (defun serve-project--vendored-p ()
   "Non-nil if the project has its own copy of the browser's Emacs."
   (file-readable-p (expand-file-name "vendor/elisp-react/js/elisp-react.js" serve-project-directory)))
@@ -377,10 +400,20 @@ that name."
           ;; changed; the answer to that is short.
           (let* ((attributes (file-attributes file))
                  (page (and (equal (file-name-extension file) "html") (serve-project--vendored-p)))
+                 ;; A compressed copy is sent in place of the file to a
+                 ;; browser that takes one, but not a part of it: the
+                 ;; parts that are asked for are parts of the file.
+                 (copy (and (not page) (serve-project--packed path file)))
+                 (packed (and copy
+                              (not (assoc "range" request-headers))
+                              (serve-project--gzip-p (cdr (assoc "accept-encoding" request-headers)))
+                              copy))
                  (tag (format "\"%x-%x%s\"" (file-attribute-size attributes)
                               (time-convert (file-attribute-modification-time attributes) 'integer)
-                              (if page "-v" "")))
-                 (headers (list (cons "ETag" tag) '("Cache-Control" . "no-cache"))))
+                              (cond (page "-v") (packed "-gz") (t ""))))
+                 (headers (append (list (cons "ETag" tag) '("Cache-Control" . "no-cache"))
+                                  (and copy '(("Vary" . "Accept-Encoding")))
+                                  (and packed '(("Content-Encoding" . "gzip"))))))
             (if (equal (cdr (assoc "if-none-match" request-headers)) tag)
                 (serve-project--respond process "304 Not Modified" nil "" headers)
               (let* ((type (or (cdr (assoc (file-name-extension file) serve-project--types))
@@ -397,6 +430,8 @@ that name."
                    process "206 Partial Content" type ""
                    (cons (cons "Content-Range" (format "bytes %d-%d/%d" (car range) (1- (cadr range)) size)) headers)
                    nil (cons file range)))
+                 (packed
+                  (serve-project--respond process "200 OK" type "" headers nil packed))
                  ((and (not page) (> size serve-project--piece))
                   (serve-project--respond process "200 OK" type "" headers nil file))
                  (t
