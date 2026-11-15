@@ -62,14 +62,20 @@ function published(sites, cache, prefix, relative) {
 
 /**
  * Start the server.  Resolves with { server, origin, project }.
+ *   plain     no cross-origin isolation headers (default: with a project,
+ *             since then the page has no editor that needs them)
  *   project   a directory: the studio's page is told about its files
  *   sites     where the sibling sites are published, for those without a
  *             checkout here; cache: where their files are kept
  */
-export async function serve({ port = 0, plain = false, project = null,
+export async function serve({ port = 0, plain = undefined, project = null,
                               sites = process.env.PUBLIC_SITES || "https://modeverv.github.io/",
                               cache = join(cacheDirectory, "sites") } = {}) {
   const local = project ? localProject(project) : null;
+  // Isolation is for the editor's SharedArrayBuffer.  A project in a
+  // directory has no editor in the page, and an isolated preview would
+  // refuse third-party frames (a YouTube player) that do not opt in.
+  plain ??= Boolean(project);
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, "http://localhost");
     const path = normalize(decodeURIComponent(url.pathname));
