@@ -36,7 +36,11 @@ async function startServer(directory, environment = {}) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
-  return { origin, port, log: () => log, stop: () => new Promise((resolve) => { child.once("exit", resolve); child.kill("SIGTERM"); }) };
+  // (A server that ended by itself has no "exit" to wait for any more.)
+  let exited = null;
+  child.once("exit", (code, signal) => { exited = signal || code; });
+  return { origin, port, log: () => log, exited: () => exited,
+           stop: () => new Promise((resolve) => { if (exited !== null) resolve(); else { child.once("exit", resolve); child.kill("SIGTERM"); } }) };
 }
 
 test("the template project runs under a native Emacs: files, server.el, kept data", async () => {
@@ -73,6 +77,11 @@ test("the template project runs under a native Emacs: files, server.el, kept dat
     assert.equal((await text("/up/elisp-studio-outside.txt"))[0], 404);
     assert.equal((await text("/inside.el"))[0], 200);
     await rm(join(directory, "..", "elisp-studio-outside.txt"));
+    // A file is not a directory: its name with a slash after it names
+    // nothing (it was an internal error; ZAP found it on 2026-11-15).
+    for (const path of ["/app.el/", "/app.el//", "/app.el/index.html", "/style.css/", "/index.html/"]) {
+      assert.equal((await text(path))[0], 404, path);
+    }
 
     // A burst: many requests at once are all answered (Emacs's default
     // queue of five waiting connections would turn some of them away).
@@ -716,6 +725,109 @@ test("signing in: sessions that last, a limit on guesses, old hashes renewed, a 
     await server.stop();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("visitors who hang up in the middle of an answer, or do not read it, do not end or keep the server", async () => {
+  // Writing to a connection that the other side has closed raises SIGPIPE,
+  // which ends an Emacs in batch mode unless the script that started it
+  // had the signal ignored.  One request for a file of a few megabytes and
+  // a closed connection was enough (found on 2026-11-15, after ZAP).
+  const directory = await mkdtemp(join(tmpdir(), "elisp-studio-hangup-"));
+  await cp(join(root, "template"), directory, { recursive: true });
+  await mkdir(join(directory, "server"));
+  for (const [path, source] of [["run.sh", "tools/project/run.sh"], ["server/serve-project.el", "tools/serve-project.el"],
+                                ["server/app-server.el", "lisp/app-server.el"]]) {
+    await cp(join(root, source), join(directory, path));
+  }
+  const big = Buffer.alloc(3_000_000, "a file that takes more than one write to send\n");
+  await writeFile(join(directory, "big.bin"), big);
+  await writeFile(join(directory, "huge.bin"), Buffer.alloc(40_000_000, "more than a connection takes without being read\n"));
+  // (In earnest a visitor has thirty seconds for a piece of an answer.)
+  await writeFile(join(directory, "server.el"), `${await readFile(join(directory, "server.el"), "utf8")}\n(setq serve-project-send-timeout 2)\n`);
+  const waitFor = async (check, label, timeout) => {
+    for (const start = Date.now(); Date.now() - start < timeout;) {
+      if (await check().catch(() => false)) return;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    throw new Error(`timed out: ${label}`);
+  };
+  await writeFile(join(directory, "big.bin.gz"), gzipSync(big, { level: 0 }));
+  // Ask and hang up at once, without reading: by closing, and by a reset.
+  const hangUp = (port, path, reset, headers = "") => new Promise((resolve) => {
+    const socket = connect(port, "127.0.0.1");
+    socket.on("error", () => resolve());
+    socket.on("connect", () => socket.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n${headers}\r\n`, () => {
+      if (reset) socket.resetAndDestroy(); else socket.destroy();
+      resolve();
+    }));
+  });
+  // The studio's own starter, and the one a downloaded project has.
+  const byRunSh = async () => {
+    const port = await freePort();
+    const child = spawn(join(directory, "run.sh"), [String(port)], { stdio: ["ignore", "ignore", "pipe"] });
+    let log = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => { log += chunk; });
+    let exited = null;
+    child.once("exit", (code, signal) => { exited = signal || code; });
+    for (let attempt = 0; ; attempt++) {
+      try { await fetch(`http://127.0.0.1:${port}/`); break; } catch (error) {
+        if (attempt > 100) throw new Error("run.sh did not start a server");
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+    return { port, origin: `http://127.0.0.1:${port}`, log: () => log, exited: () => exited,
+             stop: () => new Promise((resolve) => { if (exited !== null) resolve(); else { child.once("exit", resolve); child.kill("SIGTERM"); } }) };
+  };
+  for (const start of [() => startServer(directory), byRunSh]) {
+    const server = await start();
+    try {
+      for (const reset of [false, true]) {
+        for (const [path, headers] of [["/big.bin", ""], ["/big.bin", "Accept-Encoding: gzip\r\n"], ["/big.bin", "Range: bytes=100-2999999\r\n"],
+                                       ["/app.el", ""], ["/api/messages", ""]]) {
+          for (let i = 0; i < 10; i++) await hangUp(server.port, path, reset, headers);
+          await Promise.all(Array.from({ length: 10 }, () => hangUp(server.port, path, reset, headers)));
+        }
+      }
+      // Some that read a little first, then go.
+      await Promise.all(Array.from({ length: 20 }, () => new Promise((resolve) => {
+        const socket = connect(server.port, "127.0.0.1");
+        socket.on("error", () => resolve());
+        socket.on("connect", () => socket.write(`GET /big.bin HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\n\r\n`));
+        socket.once("data", () => { socket.destroy(); resolve(); });
+      })));
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      assert.equal(server.exited(), null, "the server ended");
+
+      // Visitors who ask for a large file and do not read it.  Emacs sends
+      // one large answer at a time, so they hold everybody up (503), but
+      // not for longer than a visitor has to take a piece of an answer.
+      const deaf = await Promise.all(Array.from({ length: 40 }, () => new Promise((resolve) => {
+        const socket = connect(server.port, "127.0.0.1");
+        socket.on("error", () => resolve(socket));
+        socket.on("connect", () => {
+          socket.pause();
+          socket.write(`GET /huge.bin HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\n\r\n`, () => resolve(socket));
+        });
+      })));
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      assert.equal((await fetch(`${server.origin}/app.el`)).status, 503);
+      await waitFor(async () => (await fetch(`${server.origin}/app.el`)).status === 200, "the server answers again while they are still connected", 15000);
+      assert.equal(deaf.filter((socket) => !socket.destroyed).length, 40);
+      for (const socket of deaf) socket.destroy();
+      assert.equal(server.exited(), null, "the server ended");
+
+      const whole = await fetch(`${server.origin}/big.bin`, { headers: { "Accept-Encoding": "identity" } });
+      assert.equal(whole.status, 200);
+      assert.equal(Buffer.from(await whole.arrayBuffer()).equals(big), true);
+      assert.equal((await fetch(`${server.origin}/api/messages`)).status, 200);
+      assert.equal(server.exited(), null, "the server ended");
+      assert.doesNotMatch(server.log(), /does not ignore SIGPIPE/);
+    } finally {
+      await server.stop();
+    }
+  }
+  await rm(directory, { recursive: true, force: true });
 });
 
 test("what the security check found stays fixed", async () => {

@@ -15,11 +15,28 @@ example.com {
 	encode zstd gzip
 	# Browsers that were here once come back over HTTPS only.
 	header Strict-Transport-Security "max-age=31536000"
-	reverse_proxy 127.0.0.1:8018
+	header X-Content-Type-Options nosniff
+
+	# The browser's Emacs, if ./fetch-emacs.sh put it into vendor/: Caddy
+	# sends those files itself (the path is the application's directory).
+	# They are what every new visitor downloads, 5 MB each, and Emacs
+	# sends one file at a time: twenty to thirty visitors arriving in the
+	# same second are what it manages, and Caddy has no such limit.  It sends
+	# the .gz copies and the parts of a file that the page asks for.
+	handle /vendor/* {
+		root * /srv/app
+		file_server {
+			precompressed gzip
+		}
+	}
+	handle {
+		reverse_proxy 127.0.0.1:8018
+	}
 }
 
 # Several cores: one Emacs uses one.  WORKERS=4 ./run.sh starts four, on
-# 8018 to 8021, and Caddy spreads the requests over them:
+# 8018 to 8021, and Caddy spreads the requests over them (in place of the
+# reverse_proxy line above):
 #
 #	reverse_proxy 127.0.0.1:8018 127.0.0.1:8019 127.0.0.1:8020 127.0.0.1:8021 {
 #		lb_policy least_conn

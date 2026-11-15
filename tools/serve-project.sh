@@ -8,6 +8,13 @@ directory="$(cd "${1:?usage: serve-project.sh DIRECTORY [PORT]}" && pwd)"
 emacs_bin="$("${here}/find-emacs.sh")"
 port="${2:-8018}"
 workers="${WORKERS:-1}"
+# A visitor who hangs up in the middle of a file must not end the server.
+# Writing to a connection that the other side has closed raises SIGPIPE,
+# and Emacs in batch mode leaves that signal as it finds it: by default,
+# the end of the process.  Ignored here, it stays ignored in Emacs, which
+# then gets an ordinary error for that one connection.
+trap '' PIPE
+export SERVE_PROJECT_SIGPIPE=ignored
 serve() {
   exec "${emacs_bin}" --batch -Q \
     --eval "(setq serve-project-directory \"${directory}/\" serve-project-port $1)" \

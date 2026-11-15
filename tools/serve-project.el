@@ -25,6 +25,11 @@
 ;; to it (NAME.gz; fetch-emacs.sh makes them) is sent as that copy to a
 ;; browser that takes gzip.
 ;;
+;; Start it with run.sh (tools/serve-project.sh in the studio's repository),
+;; not with a bare "emacs --batch": the script makes Emacs ignore SIGPIPE.
+;; Without that, a visitor who hangs up in the middle of a large answer
+;; ends the server (see `serve-project--sigpipe-ignored-p').
+;;
 ;; It listens on 127.0.0.1.  A request body is data for server.el; this
 ;; file evaluates nothing it receives.  Requests to /api/ that a page of
 ;; another site makes are refused.
@@ -69,6 +74,12 @@ say (`app-server-upload-p'); this is the limit beyond that.")
   "Seconds a connection may stay open without a request.
 Longer than a proxy keeps its idle connections (Caddy: 120 s, nginx: 60 s),
 so that it is the proxy that closes them.")
+(defvar serve-project-send-timeout 30
+  "Seconds a visitor has to take the next piece of an answer.
+An answer is sent in pieces of a quarter of a megabyte; a visitor who does
+not take one in this time (slower than 9 KB a second, or not reading at
+all) loses the connection.  Emacs sends one large answer at a time, and
+each visitor who lets one wait holds everybody else's up.")
 (defvar serve-project-log t "Non-nil: one line per request on standard error.")
 (defvar serve-project-workers (max 1 (string-to-number (or (getenv "WORKERS") "1")))
   "How many server processes share the project (WORKERS=4 ./run.sh).
@@ -136,11 +147,24 @@ only for names with a link in them.)"
              (not (string-match-p "\\`server\\(?:\\.elc?\\|/\\)" relative))
              (not (string-match-p "\\.sh\\'" relative))
              (progn (when (file-directory-p file) (setq file (expand-file-name "index.html" file)))
-                    (file-regular-p file))
+                    ;; "app.el/" is not app.el (Emacs says it is a regular
+                    ;; file, and then knows nothing more about it).
+                    (and (not (directory-name-p file)) (file-regular-p file)))
              (serve-project--inside-p file)
              file)))))
 
-(defconst serve-project--piece (* 1024 1024) "Files are sent in pieces of this size.")
+(defmacro serve-project--guarded (&rest body)
+  "Run BODY; an error in it goes into the log and no further.
+For what Emacs calls by itself: filters, sentinels, timers.  An error that
+reaches Emacs from one of those ends an Emacs in batch mode (exit status
+255), and with it the server."
+  (declare (indent 0) (debug t))
+  `(condition-case err
+       (progn ,@body)
+     (error (message "serve-project: %s" (error-message-string err)) nil)))
+
+(defconst serve-project--piece (* 1024 1024) "A file larger than this is not read into memory whole.")
+(defconst serve-project--send-piece (* 256 1024) "Files are sent in pieces of this size.")
 
 (defun serve-project--respond (process status type body &optional headers close file)
   "Send a response on PROCESS: STATUS (\"200 OK\"), TYPE, BODY (bytes).
@@ -160,32 +184,44 @@ is the part of it from byte START up to END."
            (size (cond (to (- to from))
                        (file (file-attribute-size (file-attributes file)))
                        (t (string-bytes body)))))
-      (process-send-string
-       process
-       (concat (encode-coding-string
-                (concat "HTTP/1.1 " status "\r\n"
-                        (and (not bare) (format "Content-Type: %s\r\nContent-Length: %d\r\n" type size))
-                        "X-Content-Type-Options: nosniff\r\n"
-                        ;; Not inside a frame of another site (clickjacking),
-                        ;; and no word to other sites about where one came from.
-                        "X-Frame-Options: SAMEORIGIN\r\n"
-                        "Content-Security-Policy: frame-ancestors 'self'; form-action 'self'; base-uri 'self'; object-src 'none'\r\n"
-                        "Referrer-Policy: same-origin\r\n"
-                        (mapconcat (lambda (header) (concat (car header) ": " (cdr header) "\r\n")) headers "")
-                        (if keep "Connection: keep-alive\r\n" "Connection: close\r\n")
-                        "\r\n")
-                'utf-8)
-               (if (or bare file (process-get process :head)) "" body)))
-      (when (and file (not bare) (not (process-get process :head)))
-        (let ((sent 0))
-          (while (and (< sent size) (process-live-p process))
+      ;; A write that fails means the visitor has left (or the proxy gave
+      ;; up on them).  That ends this connection and nothing else: an error
+      ;; that got out of here would get out of a filter, and an error that
+      ;; reaches Emacs from a filter ends an Emacs in batch mode.
+      (condition-case nil
+          (progn
+            ;; From now on the visitor has to take what is sent
+            ;; (`serve-project-send-timeout'; `serve-project--sweep' looks).
+            (process-put process :sending (float-time))
             (process-send-string
              process
-             (with-temp-buffer
-               (set-buffer-multibyte nil)
-               (insert-file-contents-literally file nil (+ from sent) (+ from (min size (+ sent serve-project--piece))))
-               (buffer-string)))
-            (setq sent (+ sent serve-project--piece)))))
+             (concat (encode-coding-string
+                      (concat "HTTP/1.1 " status "\r\n"
+                              (and (not bare) (format "Content-Type: %s\r\nContent-Length: %d\r\n" type size))
+                              "X-Content-Type-Options: nosniff\r\n"
+                              ;; Not inside a frame of another site (clickjacking),
+                              ;; and no word to other sites about where one came from.
+                              "X-Frame-Options: SAMEORIGIN\r\n"
+                              "Content-Security-Policy: frame-ancestors 'self'; form-action 'self'; base-uri 'self'; object-src 'none'\r\n"
+                              "Referrer-Policy: same-origin\r\n"
+                              (mapconcat (lambda (header) (concat (car header) ": " (cdr header) "\r\n")) headers "")
+                              (if keep "Connection: keep-alive\r\n" "Connection: close\r\n")
+                              "\r\n")
+                      'utf-8)
+                     (if (or bare file (process-get process :head)) "" body)))
+            (when (and file (not bare) (not (process-get process :head)))
+              (let ((sent 0))
+                (while (and (< sent size) (process-live-p process))
+                  (process-send-string
+                   process
+                   (with-temp-buffer
+                     (set-buffer-multibyte nil)
+                     (insert-file-contents-literally file nil (+ from sent) (+ from (min size (+ sent serve-project--send-piece))))
+                     (buffer-string)))
+                  (process-put process :sending (float-time))
+                  (setq sent (+ sent serve-project--send-piece)))))
+            (process-put process :sending nil))
+        (error (ignore-errors (delete-process process))))
       (when (and serve-project-log (process-get process :method))
         (message "serve-project: %s %s %s %dms" (process-get process :method)
                  (replace-regexp-in-string "[^!-~]" "?" (process-get process :path))
@@ -208,7 +244,7 @@ is the part of it from byte START up to END."
              (process-put process :since (float-time))
              ;; The next request may be here already.
              (unless (string-empty-p (process-get process :input))
-               (run-at-time 0 nil #'serve-project--next process)))))))
+               (run-at-time 0 nil (lambda () (serve-project--guarded (serve-project--next process))))))))))
 
 (defun serve-project--forget-upload (process)
   "Delete the file of PROCESS's upload, if it is still where it was put."
@@ -220,7 +256,8 @@ is the part of it from byte START up to END."
 
 (defun serve-project--sentinel (process _event)
   "A visitor who leaves in the middle of an upload leaves nothing behind."
-  (unless (process-live-p process) (serve-project--forget-upload process)))
+  (serve-project--guarded
+   (unless (process-live-p process) (serve-project--forget-upload process))))
 
 (defvar serve-project-max-connections 512
   "How many connections are open at most.
@@ -237,25 +274,26 @@ cannot have many more than a thousand; a reverse proxy uses a few.)")
   "A visitor has connected.  Make room if that is one connection too many."
   ;; (When no more can be accepted, this is called without a connection.)
   (when (processp connection)
-    (process-put connection :since (float-time))
-    (let ((all (serve-project--connections)))
-      (when (> (length all) serve-project-max-connections)
-        (let ((idle (seq-filter (lambda (process)
-                                  (not (or (eq process connection) (process-get process :busy)
-                                           (process-get process :upload-left))))
-                                all)))
-          ;; First those that never asked for anything (a flood of silent
-          ;; connections is made of them), then those that rest between
-          ;; requests; among each, the one that waited longest.
-          (delete-process
-           (if idle
-               (car (sort idle (lambda (one other)
-                                 (let ((new-one (not (process-get one :served)))
-                                       (new-other (not (process-get other :served))))
-                                   (if (eq new-one new-other)
-                                       (< (or (process-get one :since) 0) (or (process-get other :since) 0))
-                                     new-one)))))
-             connection)))))))
+    (serve-project--guarded
+     (process-put connection :since (float-time))
+     (let ((all (serve-project--connections)))
+       (when (> (length all) serve-project-max-connections)
+         (let ((idle (seq-filter (lambda (process)
+                                   (not (or (eq process connection) (process-get process :busy)
+                                            (process-get process :upload-left))))
+                                 all)))
+           ;; First those that never asked for anything (a flood of silent
+           ;; connections is made of them), then those that rest between
+           ;; requests; among each, the one that waited longest.
+           (delete-process
+            (if idle
+                (car (sort idle (lambda (one other)
+                                  (let ((new-one (not (process-get one :served)))
+                                        (new-other (not (process-get other :served))))
+                                    (if (eq new-one new-other)
+                                        (< (or (process-get one :since) 0) (or (process-get other :since) 0))
+                                      new-one)))))
+              connection))))))))
 
 (defun serve-project--refuse (process status &optional coming)
   "Answer what is not a request this server takes, and close the connection.
@@ -474,7 +512,9 @@ that name."
   (when (and (string-match-p "100-continue" (downcase (or (cdr (assoc "expect" headers)) "")))
              (not (process-get process :continued)))
     (process-put process :continued t)
-    (process-send-string process "HTTP/1.1 100 Continue\r\n\r\n")))
+    (condition-case nil
+        (process-send-string process "HTTP/1.1 100 Continue\r\n\r\n")
+      (error (ignore-errors (delete-process process))))))
 
 (defun serve-project--upload-p (process request headers length)
   "Does REQUEST bring a file?  t, nil, or the answer that refuses it.
@@ -580,46 +620,58 @@ server.el is asked once per request, when the headers are there."
 
 (defun serve-project--filter (process chunk)
   "Collect what PROCESS sends; answer a request when it is complete."
-  (cond
-   ((process-get process :upload-left) (serve-project--take process chunk))
-   ((process-get process :discard)
-    ;; The rest of a body that was refused.
-    (let ((left (- (process-get process :discard) (length chunk))))
-      (if (<= left 0)
-          (delete-process process)
-        (process-put process :discard left)
-        (process-put process :since (float-time)))))
-   (t
-    (let ((input (process-get process :input)))
-      ;; The time a request has to arrive runs from its first byte.
-      (when (and (string-empty-p (or input "")) (not (process-get process :busy)))
-        (process-put process :since (float-time)))
-      (process-put process :input (concat input chunk)))
-    (serve-project--next process))))
+  (serve-project--guarded
+   (cond
+    ((process-get process :upload-left) (serve-project--take process chunk))
+    ((process-get process :discard)
+     ;; The rest of a body that was refused.
+     (let ((left (- (process-get process :discard) (length chunk))))
+       (if (<= left 0)
+           (delete-process process)
+         (process-put process :discard left)
+         (process-put process :since (float-time)))))
+    (t
+     (let ((input (process-get process :input)))
+       ;; The time a request has to arrive runs from its first byte.
+       (when (and (string-empty-p (or input "")) (not (process-get process :busy)))
+         (process-put process :since (float-time)))
+       (process-put process :input (concat input chunk)))
+     (serve-project--next process)))))
 
 (defun serve-project--sweep ()
-  "Close the connections that wait too long: half a request, or nothing at all."
+  "Close the connections that wait too long.
+Half a request, nothing at all, or an answer that is not taken."
   (let ((now (float-time)))
     (dolist (process (process-list))
-      (when (and (process-get process :serve-project)
-                 (eq (process-status process) 'open)
-                 (not (process-get process :busy)))
-        (let ((waited (- now (or (process-get process :since) now))))
-          (cond ((process-get process :discard)
-                 (when (> waited serve-project-request-timeout) (delete-process process)))
-                ((process-get process :upload-left)
-                 ;; An upload may take as long as it takes, while it moves.
-                 (when (> waited serve-project-request-timeout)
-                   (serve-project--refuse process "408 Request Timeout")))
-                ((string-empty-p (or (process-get process :input) ""))
-                 ;; A connection that has asked for something may rest; one
-                 ;; that never said a word is not kept for long.
-                 (when (> waited (if (process-get process :served)
-                                     serve-project-idle-timeout
-                                   serve-project-request-timeout))
-                   (delete-process process)))
-                ((> waited serve-project-request-timeout)
-                 (serve-project--refuse process "408 Request Timeout"))))))))
+      (serve-project--guarded
+        ;; A visitor who does not take the answer.  The send that waits for
+        ;; them finds the connection closed and gives up, which lets the
+        ;; answers that wait behind it go on.
+        (when (and (process-get process :serve-project)
+                   (process-get process :sending)
+                   (> (- now (process-get process :sending)) serve-project-send-timeout))
+          (process-put process :sending nil)
+          (delete-process process)))
+      (serve-project--guarded
+       (when (and (process-get process :serve-project)
+                  (eq (process-status process) 'open)
+                  (not (process-get process :busy)))
+         (let ((waited (- now (or (process-get process :since) now))))
+           (cond ((process-get process :discard)
+                  (when (> waited serve-project-request-timeout) (delete-process process)))
+                 ((process-get process :upload-left)
+                  ;; An upload may take as long as it takes, while it moves.
+                  (when (> waited serve-project-request-timeout)
+                    (serve-project--refuse process "408 Request Timeout")))
+                 ((string-empty-p (or (process-get process :input) ""))
+                  ;; A connection that has asked for something may rest; one
+                  ;; that never said a word is not kept for long.
+                  (when (> waited (if (process-get process :served)
+                                      serve-project-idle-timeout
+                                    serve-project-request-timeout))
+                    (delete-process process)))
+                 ((> waited serve-project-request-timeout)
+                  (serve-project--refuse process "408 Request Timeout")))))))))
 
 (defun serve-project--compile ()
   "Byte-compile this server's own functions, which were loaded as source.
@@ -677,7 +729,8 @@ many."
                               :filter #'serve-project--filter
                               :sentinel #'serve-project--sentinel))
   (when serve-project--sweeper (cancel-timer serve-project--sweeper))
-  (let ((every (max 1 (min 5 serve-project-request-timeout serve-project-idle-timeout))))
+  (let ((every (max 1 (min 5 serve-project-request-timeout serve-project-idle-timeout
+                            serve-project-send-timeout))))
     (setq serve-project--sweeper (run-at-time every every #'serve-project--sweep)))
   (message "serve-project: http://127.0.0.1:%d/ (%s)%s" serve-project-port serve-project-directory
            (if serve-project-origins
@@ -685,8 +738,27 @@ many."
              ""))
   (message "serve-project: passwords are hashed by %s" (app-server-password-hasher)))
 
+(defun serve-project--sigpipe-ignored-p ()
+  "Non-nil if this Emacs ignores SIGPIPE, as far as that can be told.
+Writing to a connection that the other side has closed raises that
+signal.  An Emacs with a terminal ignores it; one in batch mode leaves it
+as it was when Emacs started, and by default it ends the process.  So a
+visitor who asked for a large file and hung up would end the server.
+run.sh starts Emacs with the signal ignored and says so in the
+environment; on Linux the kernel can be asked."
+  (cond ((not noninteractive) t)
+        ((file-readable-p "/proc/self/status")
+         (with-temp-buffer
+           (insert-file-contents "/proc/self/status")
+           (and (re-search-forward "^SigIgn:[ \t]*\\([0-9a-fA-F]+\\)" nil t)
+                ;; SIGPIPE is signal 13.
+                (/= 0 (logand (string-to-number (match-string 1) 16) (ash 1 12))))))
+        (t (equal (getenv "SERVE_PROJECT_SIGPIPE") "ignored"))))
+
 (defun serve-project-run ()
   "Start the server and serve until Emacs is killed (for batch mode)."
+  (unless (serve-project--sigpipe-ignored-p)
+    (message "serve-project: WARNING: this Emacs does not ignore SIGPIPE: a visitor who hangs up in the middle of a large answer ends the server.  Start it with run.sh, or from a shell after: trap '' PIPE"))
   ;; Collect garbage less often than an editor would: with the default, one
   ;; request in a hundred waits 9 ms for it.  This costs some 15 MB.
   (setq gc-cons-threshold (max gc-cons-threshold (* 16 1024 1024)))
