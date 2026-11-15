@@ -394,6 +394,9 @@ let files = new Map();        // the project as the application has it: path -> 
 // again, even if its text is what the application was given before.
 const unsaved = new Set();
 const savedAgain = new Set();
+// Files that a failed change left unloaded (the one that failed, those after
+// it): the next change loads them again, even if their text is the same.
+const retry = new Set();
 let preview = null;           // { frame, app, sources: Map(path -> name), styles: Map(path -> <style>) }
 let generation = 0;
 
@@ -543,14 +546,54 @@ addressField.addEventListener("keydown", (event) => {
   if (event.key === "Enter") preview?.app?.location?.navigate(addressField.value.trim() || "/");
 });
 
+// Definitions that a change took out of its file, but that the running
+// application still has: a renamed function, a removed component.  They
+// would go on working until the next fresh start, and fail there.  The
+// application's Emacs reads the files' top-level forms, takes away what
+// no current source defines any more, and says which other files still
+// name it.
+const DEFINITIONS = `(defun elisp-studio--defined (text)
+  (with-temp-buffer
+    (insert text) (goto-char (point-min))
+    (let (names)
+      (condition-case nil
+          (while t
+            (let ((form (read (current-buffer))))
+              (when (consp form)
+                (pcase form
+                  (\`(,(or 'defun 'defmacro 'defsubst 'cl-defun 'cl-defmacro 'define-inline 'defalias) ,(and name (pred symbolp)) . ,_)
+                   (push (list "function" name) names))
+                  (\`(defalias (quote ,name) . ,_) (push (list "function" name) names))
+                  (\`(,(or 'defvar 'defconst 'defcustom 'defvar-local) ,(and name (pred symbolp)) . ,_)
+                   (push (list "variable" name) names))
+                  (\`(react-define-component (quote ,name) . ,_) (push (list "component" name) names))))))
+        (error nil))
+      names)))
+(defun elisp-studio--forget (old current)
+  (let (gone)
+    (dolist (entry (apply #'append (mapcar #'elisp-studio--defined old)))
+      (unless (or (member entry (apply #'append (mapcar #'elisp-studio--defined current))) (member entry gone))
+        (push entry gone)
+        (pcase (car entry)
+          ("function" (fmakunbound (cadr entry)))
+          ("variable" (makunbound (cadr entry)))
+          ("component" (put (cadr entry) 'react-component nil)))))
+    (vconcat (mapcar (lambda (entry) (vector (car entry) (symbol-name (cadr entry)))) gone))))`;
+
+async function forgetRemoved(app, oldTexts, currentTexts) {
+  const vector = (texts) => `(list ${texts.map((text) => lispString(text)).join(" ")})`;
+  return app.emacs.eval(`${DEFINITIONS}\n(elisp-studio--forget ${vector(oldTexts)} ${vector(currentTexts)})`);
+}
+
 // The editor has NEXT; the application has `files`.  Bring it up to date.
 async function applyProject(next) {
   const same = (a, b) => a === b || (a instanceof Uint8Array && b instanceof Uint8Array
     && a.length === b.length && a.every((byte, i) => byte === b[i]));
-  const changed = [...next.keys()].filter((path) => !same(next.get(path), files.get(path)) || savedAgain.has(path));
+  const changed = [...next.keys()].filter((path) => !same(next.get(path), files.get(path)) || savedAgain.has(path) || retry.has(path));
   for (const path of changed) {
     unsaved.delete(path);
     savedAgain.delete(path);
+    retry.delete(path);
   }
   const first = files.size === 0;
   const before = files;
@@ -596,12 +639,10 @@ async function applyProject(next) {
           return;
         }
         const text = `${error.symbol ? `${error.symbol}: ` : ""}${error.message}`;
-        // This file and the ones after it were not loaded: the studio keeps
-        // their old text, so that the next change loads them again.
+        // This file and the ones after it were not loaded: the next change
+        // loads them again.
         const left = sources.slice(sources.indexOf(path));
-        for (const each of left) {
-          if (before.has(each)) files.set(each, before.get(each)); else files.delete(each);
-        }
+        for (const each of left) retry.add(each);
         const skipped = left.slice(1);
         showError(text);
         report("error", `${path}: not applied (the application runs on with the old code)${skipped.length ? `; not loaded after it: ${skipped.join(", ")}` : ""}`,
@@ -610,9 +651,29 @@ async function applyProject(next) {
       }
     }
   }
+  // What the change took out of its files is taken out of the application.
+  const loadedSources = sources.filter((path) => done.includes(path) && before.has(path));
+  let removed = "";
+  if (loadedSources.length) {
+    try {
+      const current = [...preview.sources.keys()].filter((path) => next.has(path)).map((path) => next.get(path));
+      const gone = await forgetRemoved(preview.app, loadedSources.map((path) => before.get(path)), current);
+      if (gone.length) {
+        // The files that still name it, as a whole symbol.
+        const symbol = (name) => new RegExp(`(^|[\\s('#,])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[\\s()])`, "m");
+        const users = (name) => [...preview.sources.keys()].filter((path) => typeof next.get(path) === "string"
+          && symbol(name).test(next.get(path)));
+        removed = gone.map(([kind, name]) => {
+          const still = users(name);
+          return `${kind} ${name} is gone${still.length ? `, but ${still.join(", ")} still use${still.length === 1 ? "s" : ""} it` : ""}`;
+        }).join("; ");
+      }
+    } catch (_) { /* reading the definitions failed: nothing taken away */ }
+  }
   if (done.length) {
     showError("");
-    report("ok", `${done.join(", ")} updated at ${clock()}: no reload, state kept`, logs.join("\n\n"));
+    report(removed && /still use/.test(removed) ? "error" : "ok",
+           `${done.join(", ")} updated at ${clock()}: no reload, state kept${removed ? `; ${removed}` : ""}`, logs.join("\n\n"));
   }
 }
 

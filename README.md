@@ -49,7 +49,7 @@ What happens when a file is saved:
 | `index.html` | The application starts again (its state is reset). |
 | `server.el` | Evaluated in the running server, which keeps its data. |
 
-Files saved together (a change that spans two files) are loaded in the order `index.html` loads them, which is the order they depend on each other in. When one fails, the files after it are not loaded; the report names them, and they are loaded with the next change.
+Files saved together (a change that spans two files) are loaded in the order `index.html` loads them, which is the order they depend on each other in. When one fails, the files after it are not loaded; the report names them, and they are loaded with the next change. A definition that a change took out of its file (a renamed function, a removed variable or component) is taken out of the running application too, as a fresh start would not have it; when another file still uses it, the report says so.
 
 In Emacs, in a file of the project:
 
@@ -412,7 +412,7 @@ node tools/record-demo.mjs   # record the pictures of this README again (needs f
 
 - Chrome on a desktop. Two Emacsen run in the tab: several hundred megabytes of memory.
 - One project.
-- After a hot change, `:initial-state` and `:did-mount` of existing components are not run again; use "restart app" for a clean start.
+- After a hot change, `:initial-state` and `:did-mount` of existing components are not run again; use "restart app" for a clean start. Taking definitions out reads the files' top-level forms (`defun`, `defmacro`, `defvar`, `defconst`, `defalias`, `react-define-component` and the like); something defined another way stays.
 - Errors that happen while the application runs have no location.
 - The editing Emacs expands the project's macros when it checks a buffer. A macro that loops forever would hang the editor.
 - Pushing to GitHub has been tested only against a repository inside Emacs's own filesystem; the path through the companion extension is wasmacs's and is tested there.

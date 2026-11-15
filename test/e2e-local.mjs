@@ -189,6 +189,21 @@ try {
   await appUntil("document.querySelector('.order')?.textContent === 'three'", "fixing lib.el loads app.el too");
   pass("files changed together load in index.html's order; after a failure the files not loaded are loaded with the next change");
 
+  // A definition taken out of its file is taken out of the application, and
+  // a file that still uses it is named.
+  await writeFile(join(project, "lib.el"), ";;; -*- lexical-binding: t; -*-\n(defun order-word-3 () \"three\")\n(defun lib-unused () 1)\n(defvar lib-setting 2)\n");
+  await appUntil("document.querySelector('.order')?.textContent === 'three'", "lib.el with more definitions");
+  const defined = (name) => js(`window.elispStudio.preview.app.emacs.eval("(vector (fboundp '${name}) (boundp 'lib-setting))")`);
+  await until("/lib.el updated/.test(document.querySelector('#status').textContent)", "lib.el is applied");
+  assert.deepEqual(await defined("lib-unused"), [true, true]);
+  await writeFile(join(project, "lib.el"), ";;; -*- lexical-binding: t; -*-\n(defun order-word-3 () \"three\")\n");
+  await until("/function lib-unused is gone; variable lib-setting is gone/.test(document.querySelector('#status').textContent)", "the removed definitions are reported");
+  assert.deepEqual(await defined("lib-unused"), [null, null]);
+  await writeFile(join(project, "lib.el"), ";;; -*- lexical-binding: t; -*-\n(defun order-word-4 () \"four\")\n");
+  await until("/function order-word-3 is gone, but app.el still uses it/.test(document.querySelector('#status').textContent)", "a file that still uses it is named");
+  await writeFile(join(project, "lib.el"), ";;; -*- lexical-binding: t; -*-\n(defun order-word-3 () \"three\")\n");
+  pass("definitions taken out of a file are taken out of the running application; a file that still uses one is named");
+
   // No isolation on this machine: there is no editor in the page.
   assert.deepEqual(await js("[window.crossOriginIsolated, document.querySelector('#preview').contentWindow.crossOriginIsolated]"), [false, false]);
   assert.equal((await fetch(`${origin}/elisp-studio/`)).headers.get("cross-origin-embedder-policy"), null);
