@@ -69,16 +69,17 @@
     (ignore-errors
       (json-parse-buffer :object-type 'plist :null-object nil :false-object nil))))
 
-(defun elisp-studio-local--ask (address path &optional data)
+(defun elisp-studio-local--ask (address path &optional data timeout)
   "Ask the studio at ADDRESS for PATH now; DATA (a plist) is sent as JSON.
-The answer as a plist, or nil if the studio does not answer."
+The answer as a plist, or nil if the studio does not answer within
+TIMEOUT seconds (5)."
   (let ((url-request-method (if data "POST" "GET"))
         (url-request-data (and data (encode-coding-string (json-serialize data) 'utf-8)))
         (url-request-extra-headers (and data '(("Content-Type" . "application/json"))))
         ;; The studio is on this machine, whatever proxy the rest uses.
         (url-proxy-services nil)
         (url-show-status nil))
-    (let ((buffer (ignore-errors (url-retrieve-synchronously (concat address path) t t 5))))
+    (let ((buffer (ignore-errors (url-retrieve-synchronously (concat address path) t t (or timeout 5)))))
       (when buffer
         (unwind-protect
             (with-current-buffer buffer (elisp-studio-local--parse))
@@ -153,16 +154,34 @@ The file is not saved, and the application keeps its state."
             ((eq (plist-get answer :listening) 0) (message "elisp-studio: the studio's window is not open"))
             (t (elisp-studio-local--await (cdr project) (plist-get answer :report)))))))
 
+(defun elisp-studio-local-eval-expression (text)
+  "Evaluate the expression TEXT in the running application and show its value.
+\(react-inspect) shows the components with their props and state.
+Returns the printed value."
+  (interactive (list (read-from-minibuffer "Eval in the application: " nil read-expression-map nil
+                                           'read-expression-history)))
+  (let* ((project (or (elisp-studio-local--project) (user-error "This file is not in a project that a studio follows")))
+         (answer (elisp-studio-local--ask (cdr project) "/__project/value" (list :text text) 20)))
+    (cond ((null answer) (message "elisp-studio: the studio does not answer (node tools/studio.mjs DIRECTORY)") nil)
+          ((plist-get answer :error) (message "elisp-studio: %s" (plist-get answer :error)) nil)
+          (t (let ((output (plist-get answer :output)))
+               (unless (equal output "") (message "%s" (string-trim-right output))))
+             (message "%s" (plist-get answer :value))
+             (plist-get answer :value)))))
+
 (defvar elisp-studio-local-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-M-x") #'elisp-studio-local-eval-defun)
+    (define-key map (kbd "C-c C-e") #'elisp-studio-local-eval-expression)
     map))
 
 ;;;###autoload
 (define-minor-mode elisp-studio-local-mode
   "A file of a project that a studio on this machine follows.
 Saving shows the studio's answer; \\[elisp-studio-local-eval-defun]
-evaluates the definition at point in the running application."
+evaluates the definition at point in the running application;
+\\[elisp-studio-local-eval-expression] evaluates an expression there and
+shows its value."
   :lighter " Studio"
   (if elisp-studio-local-mode
       (progn (add-hook 'before-save-hook #'elisp-studio-local--saving nil t)

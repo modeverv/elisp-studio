@@ -19,6 +19,9 @@
 //                                    up to &wait=SECONDS for it: for the editor
 //   POST /__project/eval             { file, text }: evaluate TEXT in the
 //                                    running application, as C-M-x does
+//   POST /__project/value            { text }: evaluate TEXT in the running
+//                                    application and answer with its value:
+//                                    { value, output } or { error }
 //   GET  /__project/files/PATH       a file of the project, for the
 //                                    application (images, data): not hidden
 //                                    files, server*, *.sh or .data/
@@ -90,6 +93,8 @@ export function localProject(directory) {
   let seen = current.stamp;               // what the last look found
   let report = { n: 0 };
   let waiting = [];                       // editors that wait for the next report
+  let nextValue = 0;
+  const values = new Map();               // id -> answer function, for /__project/value
 
   const send = (response, event, data) => response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   const filesEvent = () => ({ directory, files: current.files });
@@ -166,6 +171,24 @@ export function localProject(directory) {
                                 "Cache-Control": "no-store", "Cross-Origin-Resource-Policy": "same-origin" });
       createReadStream(file).pipe(response);
       return;
+    }
+    if (what === "POST /__project/value") {
+      const given = await body(request);
+      if (typeof given.text !== "string") return json(response, 400, { error: "text" });
+      if (listeners.size === 0) return json(response, 200, { error: "the studio's window is not open" });
+      const id = ++nextValue;
+      const answer = await new Promise((done) => {
+        const timeout = setTimeout(() => done({ error: "the application did not answer within 15 s" }), 15000);
+        values.set(id, (value) => { clearTimeout(timeout); done(value); });
+        for (const listener of listeners) send(listener, "value", { id, text: given.text });
+      });
+      values.delete(id);
+      return json(response, 200, answer);
+    }
+    if (what === "POST /__project/value-answer") {
+      const given = await body(request);
+      values.get(given.id)?.({ value: given.value ?? null, output: given.output ?? "", error: given.error ?? null });
+      return json(response, 200, {});
     }
     if (what === "POST /__project/eval") {
       const given = await body(request);

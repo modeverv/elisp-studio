@@ -378,6 +378,9 @@ try {
   await editFile("index.html", '<div id="app">Loading Emacs…</div>', '<header id="banner">My page</header><div id="app">Loading Emacs…</div>');
   await appUntil("document.querySelector('#banner')?.textContent === 'My page' && document.querySelector('h1')?.textContent === 'Back'", "index.html restarts the application");
   pass("a changed index.html starts the application again");
+  assert.equal((await js("window.elispStudio.evaluate('(+ 20 22)')")).value, "42");
+  assert.match((await js("window.elispStudio.evaluate('(react-inspect)')")).value, /:component/);
+  pass("an expression is evaluated in the application from the console, with its value (react-inspect lists the components)");
 
   // Close the tab, come back: the project (Emacs's files) and what the
   // server kept are still there.

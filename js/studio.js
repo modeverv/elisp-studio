@@ -704,6 +704,23 @@ async function applyProject(next) {
   }
 }
 
+// An expression, evaluated in the running application, with its value
+// printed (depth and length bounded): what the editor's M-: would give,
+// for an editor on this machine and for the console.  (react-inspect)
+// shows the components with their props and state.
+async function evaluate(text) {
+  if (!preview?.app) return { error: "the application is not running" };
+  try {
+    const answer = await withTimeout(preview.app.emacs.eval(
+      `(let ((value (progn ${text}\n))) (let ((print-length 60) (print-level 8)) (prin1-to-string value)))`,
+      { detailed: true }), LOAD_TIMEOUT_MS, "the application");
+    await preview.app.run("nil");          // render what it changed
+    return { value: answer.value, output: answer.output || "" };
+  } catch (error) {
+    return { error: `${error.symbol ? `${error.symbol}: ` : ""}${error.message}` };
+  }
+}
+
 // C-M-x in Emacs: one definition, evaluated in the running application.
 async function evalInApplication(file, text) {
   if (file === SERVER_FILE) {
@@ -826,6 +843,7 @@ window.elispStudio = {
   get server() { return server; },
   zip: projectZip,
   editor: editorFrame,
+  evaluate,
 };
 
 // The project in a directory: the server says what its files are, now and
@@ -843,6 +861,13 @@ function listenToDirectory() {
     queue = queue.then(() => applyProject(next)).catch((error) => {
       setStatus("studio error", "error");
       showError(error.stack || String(error));
+    });
+  });
+  events.addEventListener("value", (event) => {
+    const { id, text } = JSON.parse(event.data);
+    queue = queue.then(async () => {
+      const answer = await evaluate(text);
+      await fetch("/__project/value-answer", { method: "POST", body: JSON.stringify({ id, ...answer }) }).catch(() => {});
     });
   });
   events.addEventListener("eval", (event) => {

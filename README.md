@@ -368,6 +368,7 @@ That needs nothing in Emacs. For what a window cannot do by itself there is `lis
 |---|---|
 | `C-x C-s` | As ever; then the studio's answer appears in the echo area ("app.el updated: no reload, state kept"), or the compiler's warnings and the error in the buffer `*elisp-studio*`, where `next-error` goes to their places in your files. |
 | `C-M-x` | The definition at point is evaluated in the running application, without saving the file. |
+| `C-c C-e` | An expression is evaluated in the running application and its value shown: `(react-inspect)` lists the components with their props and state. |
 
 The directory is an ordinary project: `index.html`, `app.el`, `style.css`, perhaps `server.el`, and git as you like. `server.el` runs in the window as it does in the studio on the web (a third Emacs in the tab, its data in the browser's storage); to run it in a native Emacs, download the ZIP from the window and use its `run.sh`, or copy `tools/project/` yourself. What the Emacs in the page offers beyond saving (completion and Flymake from the project's own definitions, `C-c C-p`) is not in `elisp-studio-local.el`: your Emacs has its own.
 

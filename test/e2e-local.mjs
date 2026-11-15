@@ -223,6 +223,13 @@ try {
   await appUntil("document.querySelector('.greeting-word')?.textContent === 'good morning'", "and renders");
   pass("a save that loads but fails to render is reported as that, naming the component; the next good save clears it");
 
+  // An expression evaluated in the running application, with its value.
+  const value = await (await fetch(`${origin}/__project/value`, { method: "POST", body: JSON.stringify({ text: "(+ 20 22)" }) })).json();
+  assert.deepEqual(value, { value: "42", output: "", error: null });
+  const inspected = await inEmacs(`(find-file ${JSON.stringify(join(project, "app.el"))}) (princ (elisp-studio-local-eval-expression "(react-inspect)"))`);
+  assert.match(inspected, /:component Greeting :depth 0/);
+  pass(`an expression is evaluated in the application and its value comes back, to Emacs too: ${inspected.trim()}`);
+
   // No isolation on this machine: there is no editor in the page.
   assert.deepEqual(await js("[window.crossOriginIsolated, document.querySelector('#preview').contentWindow.crossOriginIsolated]"), [false, false]);
   assert.equal((await fetch(`${origin}/elisp-studio/`)).headers.get("cross-origin-embedder-policy"), null);
