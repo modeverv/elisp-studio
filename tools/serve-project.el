@@ -433,15 +433,25 @@ anything itself."
          (not (file-newer-than-file-p file packed))
          packed)))
 
+(defun serve-project--vendored (name)
+  "Non-nil if the project has its own copy of NAME in vendor/: `elisp-react'
+or `wasmacs' (the browser's Emacs).  fetch-emacs.sh brings both; a project
+may keep elisp-react there by itself, at a version of its choosing."
+  (file-readable-p (expand-file-name (if (eq name 'wasmacs)
+                                         "vendor/wasmacs/app/src/emacs-eval-client.js"
+                                       "vendor/elisp-react/js/elisp-react.js")
+                                     serve-project-directory)))
+
 (defun serve-project--vendored-p ()
-  "Non-nil if the project has its own copy of the browser's Emacs."
-  (file-readable-p (expand-file-name "vendor/elisp-react/js/elisp-react.js" serve-project-directory)))
+  "Non-nil if the project has its own copy of elisp-react or of the browser's Emacs."
+  (or (serve-project--vendored 'elisp-react) (serve-project--vendored 'wasmacs)))
 
 (defun serve-project--page (html)
   "The page HTML, using the copies in /vendor/ instead of the public sites."
   (let ((case-fold-search t))
-    (setq html (replace-regexp-in-string "https://modeverv\\.github\\.io/elisp-react/" "/vendor/elisp-react/" html t t))
-    (if (string-match "<head[^>]*>" html)
+    (when (serve-project--vendored 'elisp-react)
+      (setq html (replace-regexp-in-string "https://modeverv\\.github\\.io/elisp-react/" "/vendor/elisp-react/" html t t)))
+    (if (and (serve-project--vendored 'wasmacs) (string-match "<head[^>]*>" html))
         (replace-match (concat (match-string 0 html)
                                "\n    <meta name=\"elisp-react:wasmacs\" content=\"/vendor/wasmacs/\">")
                        t t html)
