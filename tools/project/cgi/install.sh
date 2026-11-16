@@ -35,7 +35,8 @@ APP_DIRECTORY=$app
 APP_DATA=$app/data
 APP_MYSQL=$mysql
 PUBLIC_ORIGIN=$origin
-export APP_DIRECTORY APP_DATA APP_MYSQL PUBLIC_ORIGIN
+PATH="$PATH"
+export APP_DIRECTORY APP_DATA APP_MYSQL PUBLIC_ORIGIN PATH
 exec $emacs --batch -Q -l "\$APP_DIRECTORY/server/serve-cgi.el" -f serve-cgi-main
 CGI
 chmod 755 "$web/app.cgi"
@@ -50,7 +51,9 @@ APP_DATA=$app/data
 APP_MYSQL=$mysql
 PUBLIC_ORIGIN=$origin
 APP_JOB=\${1:-}
-export APP_DIRECTORY APP_DATA APP_MYSQL PUBLIC_ORIGIN APP_JOB
+# The PATH of the deployment: cron's has neither curl nor mysql on some hosts.
+PATH="$PATH"
+export APP_DIRECTORY APP_DATA APP_MYSQL PUBLIC_ORIGIN APP_JOB PATH
 exec $emacs --batch -Q -l "\$APP_DIRECTORY/server/serve-cgi.el" -f serve-cgi-jobs-main
 JOB
 chmod 700 "$app/job.sh"

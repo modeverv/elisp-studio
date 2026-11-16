@@ -115,7 +115,11 @@ test("install.sh: the page's files to the web directory, the rest with app.cgi a
     assert.equal((await stat(join(home, "app-dir/job.sh"))).mode & 0o777, 0o700);
     await stat(join(home, "app-dir/server/serve-cgi.elc"));
     await assert.rejects(stat(incoming), "INCOMING is removed");
-    execFileSync(join(home, "app-dir/job.sh"), ["app-server-cleanup"], { env, stdio: "ignore" });
+    // The PATH of the deployment, not cron's (curl and mysql may be elsewhere).
+    for (const file of ["app-dir/job.sh", "www/app/app.cgi"]) {
+      assert.ok((await readFile(join(home, file), "utf8")).includes(`PATH="${env.PATH}"`), file);
+    }
+    execFileSync(join(home, "app-dir/job.sh"), ["app-server-cleanup"], { env: { HOME: home, PATH: "/usr/bin:/bin" }, stdio: "ignore" });
     assert.match(await readFile(join(home, "app-dir/data/jobs.log"), "utf8"), /app-server-cleanup done\n$/);
   } finally {
     await rm(home, { recursive: true, force: true });
