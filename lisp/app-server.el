@@ -1372,6 +1372,11 @@ many is `app-server-attempts-max' within `app-server-attempts-seconds'."
   "Seconds a run of a job may take.  After that another run may start
 (the process of this one was ended, say).")
 
+(defvar app-server-job-slack 30
+  "Seconds a job may run before it is due.  Cron starts on the minute and
+Emacs a moment later, so a job of 900 seconds from cron every 15 minutes
+would otherwise find itself a moment too early, and run every 30.")
+
 (defun app-server-defjob (name &rest spec)
   "Make NAME, a symbol, a job of the application: something to do every so often.
 SPEC is a plist:
@@ -1415,7 +1420,7 @@ way: non-nil if this process has it now."
                   (format "UPDATE %s SET running_until = ? WHERE name = ?
                              AND (running_until IS NULL OR running_until < ?)
                              AND (? OR last_run IS NULL OR last_run <= ?)" table)
-                  (list (+ now app-server-job-timeout) key now (if force 1 0) (- now every)))))
+                  (list (+ now app-server-job-timeout) key now (if force 1 0) (- (+ now app-server-job-slack) every)))))
       ;; No database: a directory is made by one process only.
       (let ((lock (expand-file-name (concat "jobs/" key ".lock") app-server-data-directory))
             (last (cdr (assoc key (app-server-read "jobs" nil)))))
@@ -1424,20 +1429,22 @@ way: non-nil if this process has it now."
                    (> (- now (float-time (file-attribute-modification-time (file-attributes lock))))
                       app-server-job-timeout))
           (ignore-errors (delete-directory lock)))
-        (and (or force (null last) (<= last (- now every)))
+        (and (or force (null last) (<= last (- (+ now app-server-job-slack) every)))
              (condition-case nil (progn (make-directory lock) t) (file-already-exists nil)))))))
 
-(defun app-server--job-done (name)
-  "Note that the run of job NAME has ended, now."
+(defun app-server--job-done (name started)
+  "Note that the run of job NAME, STARTED then, has ended.
+The next is due from its start: a job of 900 seconds from cron every 15
+minutes runs every 15 minutes, whatever it takes."
   (let ((database (app-server--own-database))
         (key (symbol-name name)))
     (if database
         (app-server--own-sql database 'execute
                              (format "UPDATE %s SET running_until = NULL, last_run = ? WHERE name = ?"
                                      (if (eq database 'mysql) "app_server_jobs" "jobs"))
-                             (list (float-time) key))
+                             (list started key))
       (let ((runs (app-server-read "jobs" nil)))
-        (setf (alist-get key runs nil nil #'equal) (float-time))
+        (setf (alist-get key runs nil nil #'equal) started)
         (app-server-write "jobs" runs)
         (ignore-errors (delete-directory (expand-file-name (concat "jobs/" key ".lock") app-server-data-directory)))))))
 
@@ -1452,7 +1459,7 @@ or the message of the failure."
            (end (lambda (&optional failure)
                   (unless ended
                     (setq ended t)
-                    (ignore-errors (app-server--job-done name))
+                    (ignore-errors (app-server--job-done name started))
                     (message "app-server: job %s %s in %dms" name
                              (if failure (format "failed: %s" failure) "done")
                              (round (* 1000 (- (float-time) started))))

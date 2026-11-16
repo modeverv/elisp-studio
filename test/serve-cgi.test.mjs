@@ -270,6 +270,27 @@ test("app-server-read and app-server-write keep their values in MySQL, and still
     }
   });
 
+test("a job of 900 seconds from cron every 15 minutes runs every 15 minutes (database or files)", async () => {
+  for (const files of [false, true]) {
+    const data = await mkdtemp(join(tmpdir(), "elisp-studio-jobs-"));
+    try {
+      const out = execFileSync(emacs, ["--batch", "-Q", "-l", join(root, "lisp/app-server.el"), "--eval", `(progn
+        (setq app-server-data-directory ${JSON.stringify(data + "/")})
+        (let ((runs nil) (now (float-time)))
+          (app-server-defjob 'every-900 :every 900 :function (lambda () (push (round (- (float-time) now)) runs)))
+          (cl-letf (((symbol-function 'app-server--own-database) ${files ? "#'ignore" : "(symbol-function 'app-server--own-database)"}))
+            ;; The start of each cron run, a moment late or early.
+            (dolist (at '(0.4 899.6 1200.2 1800.3 2699.9))
+              (cl-letf (((symbol-function 'float-time) (lambda (&optional _) (+ now at))))
+                (app-server-run-jobs))))
+          (prin1 (reverse runs))))`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      assert.equal(out, "(0 900 1800 2700)", files ? "files" : "database");
+    } finally {
+      await rm(data, { recursive: true, force: true });
+    }
+  }
+});
+
 test("app-server-fetch through curl (an Emacs without GnuTLS): status, text, headers, body, no answer", async () => {
   const { createServer } = await import("node:http");
   const server = createServer((request, response) => {
