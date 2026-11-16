@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { closeSync, openSync, writeFileSync } from "node:fs";
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -90,6 +90,37 @@ async function project(example) {
   await cp(join(root, example), directory, { recursive: true });
   return { directory, data: join(directory, ".data") };
 }
+
+test("install.sh: the page's files to the web directory, the rest with app.cgi and job.sh outside it", async () => {
+  const home = await mkdtemp(join(tmpdir(), "elisp-studio-install-"));
+  try {
+    // The project as deploy.sh sends it: the download of examples/todos.
+    const incoming = join(home, ".deploy-1");
+    await cp(join(root, "examples/todos"), incoming, { recursive: true });
+    for (const [to, from] of [
+      ["server/serve-project.el", "tools/serve-project.el"], ["server/app-server.el", "lisp/app-server.el"],
+      ["server/serve-cgi.el", "tools/serve-cgi.el"], ["server/cgi/install.sh", "tools/project/cgi/install.sh"],
+      ["server/cgi/htaccess", "tools/project/cgi/htaccess"], ["run.sh", "tools/project/run.sh"],
+      [".gitignore", "tools/project/gitignore"], ["test/run.sh", "tools/project/test/run.sh"],
+    ]) await cp(join(root, from), join(incoming, to));
+    // install.sh takes the `emacs' of the PATH (a script: Emacs.app's binary does not work through a link).
+    await mkdir(join(home, "bin"));
+    await writeFile(join(home, "bin/emacs"), `#!/bin/sh\nexec ${JSON.stringify(emacs)} "$@"\n`, { mode: 0o755 });
+    const env = { PATH: `${join(home, "bin")}:${process.env.PATH}`, HOME: home };
+    const said = execFileSync("sh", [join(incoming, "server/cgi/install.sh"), ".deploy-1", "www/app", "app-dir", origin],
+      { env, encoding: "utf8" });
+    assert.match(said, /https:\/\/example\.test\/ is .*www\/app; the server reads .*app-dir; jobs: .*app-dir\/job\.sh/);
+    assert.deepEqual((await readdir(join(home, "www/app"))).sort(), [".htaccess", "app.cgi", "app.el", "index.html", "style.css"]);
+    assert.equal((await stat(join(home, "app-dir"))).mode & 0o777, 0o700);
+    assert.equal((await stat(join(home, "app-dir/job.sh"))).mode & 0o777, 0o700);
+    await stat(join(home, "app-dir/server/serve-cgi.elc"));
+    await assert.rejects(stat(incoming), "INCOMING is removed");
+    execFileSync(join(home, "app-dir/job.sh"), ["app-server-cleanup"], { env, stdio: "ignore" });
+    assert.match(await readFile(join(home, "app-dir/data/jobs.log"), "utf8"), /app-server-cleanup done\n$/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
 
 test("serve-cgi answers server.el's API with serve-project's checks and headers", async () => {
   const { directory, data } = await project("template");
@@ -177,7 +208,7 @@ async function todosStory(env) {
     const back = await cgi(directory, data, "GET", `/api/todos/file?id=${file}`, { cookie: alice, env, binary: true });
     assert.equal(back.status, 200);
     assert.deepEqual(back.bytes, bytes);
-    assert.match(back.headers["content-disposition"], /attachment; filename=/);
+    assert.equal(back.headers["content-disposition"], `attachment; filename="__ v1.bin"; filename*=UTF-8''%E3%83%A1%E3%83%A2%20v1.bin`);
     assert.equal((await cgi(directory, data, "GET", `/api/todos/file?id=${file}`, { cookie: bob, env })).status, 404);
     // Too large: refused before the body is taken.
     assert.equal((await cgi(directory, data, "POST", `/api/todos/attach?id=${todo}&name=big`,

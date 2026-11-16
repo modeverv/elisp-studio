@@ -105,7 +105,7 @@ refusal rejects with the server's text."
              (and (plist-get todo :files)
                   (jsx (ul (:class "files")
                          (mapcar (lambda (file)
-                                   (jsx (li (:key (plist-get file :id) :class "file")
+                                   (jsx (li (:key (plist-get file :id) :class "attachment")
                                           (a (:href (format "api/todos/file?id=%d" (plist-get file :id))) (plist-get file :name))
                                           (span (:class "size") (todos-size (plist-get file :size)))
                                           (button (:class "detach" :title "remove the file"
