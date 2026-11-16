@@ -55,6 +55,7 @@
 (defvar serve-project-port 8018)
 (defvar serve-project--process nil)
 (defvar serve-project--sweeper nil)
+(defvar serve-project--jobs nil "The timer that runs the jobs that are due.")
 
 (defvar serve-project-origins
   (mapcar (lambda (origin) (string-trim-right origin "/+"))
@@ -973,6 +974,11 @@ many."
                               :log #'serve-project--accepted
                               :filter #'serve-project--filter
                               :sentinel #'serve-project--sentinel))
+  ;; The jobs of server.el (`app-server-defjob'): every minute, those that
+  ;; are due.  Workers that share the data take turns (the database's lock).
+  (when serve-project--jobs (cancel-timer serve-project--jobs))
+  (setq serve-project--jobs
+        (run-at-time 60 60 (lambda () (serve-project--guarded (app-server-run-jobs nil t)))))
   (when serve-project--sweeper (cancel-timer serve-project--sweeper))
   (let ((every (max 1 (min 5 serve-project-request-timeout serve-project-idle-timeout
                             serve-project-send-timeout))))

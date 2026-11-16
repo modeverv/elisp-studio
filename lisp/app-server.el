@@ -120,14 +120,23 @@ From `load-history'; a compiled file counts as its source."
     (error "Not a name for server data: %S" name))
   (expand-file-name (concat name ".eld") app-server-data-directory))
 
+(defvar app-server-mysql)           ; below, with the SQL
+
 (defun app-server-read (name &optional default)
-  "The Lisp value kept under NAME, or DEFAULT."
-  (let ((file (app-server--data-file name)))
-    (if (file-readable-p file)
-        (with-temp-buffer
-          (insert-file-contents file)
-          (read (current-buffer)))
-      default)))
+  "The Lisp value kept under NAME, or DEFAULT.
+With `app-server-mysql' it is in the table app_server_data of that
+database; otherwise in a file of the data directory."
+  (let* ((file (app-server--data-file name))
+         (row (and app-server-mysql
+                   (car (app-server--own-sql 'mysql 'select "SELECT value FROM app_server_data WHERE name = ?"
+                                             (list name))))))
+    (cond (row (car (read-from-string (car row))))
+          ;; Also what was kept in a file, before the data went to MySQL.
+          ((file-readable-p file)
+           (with-temp-buffer
+             (insert-file-contents file)
+             (read (current-buffer))))
+          (t default))))
 
 (defvar app-server-shared nil
   "Non-nil when several server processes share the data directory.
@@ -137,8 +146,20 @@ database.")
 
 (defun app-server-write (name value)
   "Keep the Lisp VALUE under NAME.  Returns VALUE.
-The file is replaced in one step: a reader sees the old value or the new
-one, never half of one."
+It is replaced in one step: a reader sees the old value or the new one,
+never half of one.  With `app-server-mysql', a row of the table
+app_server_data; otherwise a file of the data directory."
+  (if app-server-mysql
+      (let ((print-length nil) (print-level nil))
+        (app-server--data-file name)        ; the same names as for files
+        (app-server--own-sql 'mysql 'execute
+                             "INSERT INTO app_server_data (name, value, updated) VALUES (?, ?, ?) AS new
+                              ON DUPLICATE KEY UPDATE value = new.value, updated = new.updated"
+                             (list name (prin1-to-string value) (float-time)))
+        value)
+    (app-server--write-file name value)))
+
+(defun app-server--write-file (name value)
   (let* ((file (app-server--data-file name))
          (print-length nil) (print-level nil)
          (coding-system-for-write 'utf-8-unix)
@@ -1158,6 +1179,8 @@ SQLite database server.db, or nil (this Emacs's memory) without either."
                                     token TEXT PRIMARY KEY, visitor TEXT NOT NULL, expires REAL NOT NULL)")
         (sqlite-execute database "CREATE TABLE IF NOT EXISTS attempts (name TEXT NOT NULL, at REAL NOT NULL)")
         (sqlite-execute database "CREATE INDEX IF NOT EXISTS attempts_name ON attempts (name)")
+        (sqlite-execute database "CREATE TABLE IF NOT EXISTS jobs (
+                                    name TEXT PRIMARY KEY, last_run REAL, running_until REAL)")
         (setq app-server--own-tables t))
       database))))
 
@@ -1171,7 +1194,13 @@ SQLite database server.db, or nil (this Emacs's memory) without either."
                              expires DOUBLE NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
   (app-server-sql-execute "CREATE TABLE IF NOT EXISTS app_server_attempts (
                              name CHAR(64) NOT NULL, at DOUBLE NOT NULL,
-                             KEY app_server_attempts_name (name)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"))
+                             KEY app_server_attempts_name (name)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
+  (app-server-sql-execute "CREATE TABLE IF NOT EXISTS app_server_data (
+                             name VARCHAR(64) NOT NULL PRIMARY KEY, value LONGTEXT NOT NULL,
+                             updated DOUBLE NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
+  (app-server-sql-execute "CREATE TABLE IF NOT EXISTS app_server_jobs (
+                             name VARCHAR(64) NOT NULL PRIMARY KEY, last_run DOUBLE NULL,
+                             running_until DOUBLE NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"))
 
 (defun app-server--own-sql (database kind sql &optional params)
   "Run SQL with PARAMS on DATABASE (`app-server--own-database'): KIND is
@@ -1329,6 +1358,151 @@ many is `app-server-attempts-max' within `app-server-attempts-seconds'."
         (remhash (concat "attempts " name) app-server--memory))))
   nil)
 
+;;;; Scheduled work
+
+(defvar app-server-jobs nil
+  "The jobs of the application: ((NAME . SPEC) ...); see `app-server-defjob'.")
+
+(defvar app-server-job-timeout 600
+  "Seconds a run of a job may take.  After that another run may start
+(the process of this one was ended, say).")
+
+(defun app-server-defjob (name &rest spec)
+  "Make NAME, a symbol, a job of the application: something to do every so often.
+SPEC is a plist:
+
+:every SECONDS     how often it is due
+:function F        what it does: (F) returns when it is done; or, with
+:later t,          (F DONE): F starts the work and calls DONE when it has
+                   finished (after `app-server-fetch', say)
+
+There is no resident process to run it with a timer on every host: a
+host runs the due jobs, each at most once at a time however many
+processes ask (the database keeps a lock for it):
+
+  a native Emacs (run.sh)      every minute, by itself
+  a shared host (CGI)          APP-DIR/job.sh, from cron (tools/serve-cgi.el)
+  the studio's browser tab     not at all
+
+A job is not given a request: no session, no cookie.  A job that fails
+is logged and is due again after SECONDS.  Returns NAME."
+  (unless (and (natnump (plist-get spec :every)) (functionp (plist-get spec :function)))
+    (error "A job needs :every SECONDS and :function"))
+  (setf (alist-get name app-server-jobs) spec)
+  name)
+
+(defun app-server--job-claim (name every force)
+  "Start the run of job NAME if it is due (or FORCE) and no run is under
+way: non-nil if this process has it now."
+  (let* ((database (app-server--own-database))
+         (now (float-time))
+         (key (symbol-name name)))
+    (if database
+        (let ((table (if (eq database 'mysql) "app_server_jobs" "jobs")))
+          (app-server--own-sql database 'execute
+                               (format (if (eq database 'mysql) "INSERT IGNORE INTO %s (name) VALUES (?)"
+                                         "INSERT OR IGNORE INTO %s (name) VALUES (?)")
+                                       table)
+                               (list key))
+          ;; One UPDATE: of two processes that ask at once, one changes the row.
+          (eql 1 (app-server--own-sql
+                  database 'execute
+                  (format "UPDATE %s SET running_until = ? WHERE name = ?
+                             AND (running_until IS NULL OR running_until < ?)
+                             AND (? OR last_run IS NULL OR last_run <= ?)" table)
+                  (list (+ now app-server-job-timeout) key now (if force 1 0) (- now every)))))
+      ;; No database: a directory is made by one process only.
+      (let ((lock (expand-file-name (concat "jobs/" key ".lock") app-server-data-directory))
+            (last (cdr (assoc key (app-server-read "jobs" nil)))))
+        (make-directory (file-name-directory lock) t)
+        (when (and (file-directory-p lock)
+                   (> (- now (float-time (file-attribute-modification-time (file-attributes lock))))
+                      app-server-job-timeout))
+          (ignore-errors (delete-directory lock)))
+        (and (or force (null last) (<= last (- now every)))
+             (condition-case nil (progn (make-directory lock) t) (file-already-exists nil)))))))
+
+(defun app-server--job-done (name)
+  "Note that the run of job NAME has ended, now."
+  (let ((database (app-server--own-database))
+        (key (symbol-name name)))
+    (if database
+        (app-server--own-sql database 'execute
+                             (format "UPDATE %s SET running_until = NULL, last_run = ? WHERE name = ?"
+                                     (if (eq database 'mysql) "app_server_jobs" "jobs"))
+                             (list (float-time) key))
+      (let ((runs (app-server-read "jobs" nil)))
+        (setf (alist-get key runs nil nil #'equal) (float-time))
+        (app-server-write "jobs" runs)
+        (ignore-errors (delete-directory (expand-file-name (concat "jobs/" key ".lock") app-server-data-directory)))))))
+
+(defun app-server--job-start (name spec force finish)
+  "Run job NAME (SPEC: see `app-server-defjob') if it is due or FORCE and
+no other process runs it; call FINISH with the result: `done', `not-due'
+or the message of the failure."
+  (if (not (app-server--job-claim name (plist-get spec :every) force))
+      (funcall finish 'not-due)
+    (let* ((started (float-time))
+           (ended nil)
+           (end (lambda (&optional failure)
+                  (unless ended
+                    (setq ended t)
+                    (ignore-errors (app-server--job-done name))
+                    (message "app-server: job %s %s in %dms" name
+                             (if failure (format "failed: %s" failure) "done")
+                             (round (* 1000 (- (float-time) started))))
+                    (funcall finish (or failure 'done))))))
+      (condition-case err
+          (if (plist-get spec :later)
+              (funcall (plist-get spec :function)
+                       (lambda (&optional problem)
+                         (funcall end (and problem (format "%s" problem)))))
+            (funcall (plist-get spec :function))
+            (funcall end))
+        (error (funcall end (error-message-string err)))))))
+
+(defun app-server-run-jobs (&optional only no-wait)
+  "Run the jobs that are due; with ONLY (a symbol), that job, due or not.
+Each runs where no other process runs it.  Returns ((NAME . RESULT) ...):
+RESULT is `done', `not-due' (or under way elsewhere) or the message of
+the failure; it waits for the jobs that finish later (`:later'), at
+most `app-server-job-timeout' seconds.  With NO-WAIT it starts them and
+returns nil at once: a server that keeps answering requests meanwhile."
+  (let ((results nil) (pending 0) (started (float-time)))
+    (dolist (entry (reverse app-server-jobs))
+      (let ((name (car entry)))
+        (when (or (not only) (eq only name))
+          (setq pending (1+ pending))
+          (app-server--job-start name (cdr entry) (and only t)
+                                 (lambda (result)
+                                   (setq pending (1- pending))
+                                   (push (cons name result) results))))))
+    (unless no-wait
+      (while (and (> pending 0) (< (- (float-time) started) app-server-job-timeout))
+        (accept-process-output nil 0.05))
+      (nreverse results))))
+
+(defun app-server-cleanup ()
+  "Forget what has run out: sessions, old failed attempts, and uploads
+that a request ended in the middle of left half written.  A job of every
+application (`app-server-jobs')."
+  (let ((database (app-server--own-database))
+        (now (float-time)))
+    (when database
+      (app-server--own-sql database 'execute
+                           (format "DELETE FROM %s WHERE expires < ?" (app-server--own-table database 'sessions))
+                           (list now))
+      (app-server--own-sql database 'execute
+                           (format "DELETE FROM %s WHERE at < ?" (app-server--own-table database 'attempts))
+                           (list (- now app-server-attempts-seconds)))))
+  (let ((uploads (expand-file-name "uploads/" app-server-data-directory)))
+    (when (file-directory-p uploads)
+      (dolist (file (directory-files uploads t "\\`[^.]"))
+        (when (> (- (float-time) (float-time (file-attribute-modification-time (file-attributes file)))) 86400)
+          (ignore-errors (delete-file file)))))))
+
+(app-server-defjob 'app-server-cleanup :every 3600 :function #'app-server-cleanup)
+
 ;;;; Answering later
 
 (cl-defstruct (app-server--deferred (:constructor app-server--deferred-create))
@@ -1380,10 +1554,13 @@ An error it signals fails that request instead of being lost."
   (lambda (seconds function) (run-at-time seconds nil function))
   "Function of (SECONDS FUNCTION) that calls FUNCTION after SECONDS.")
 
-(defvar app-server-fetch-function #'app-server--url-fetch
+(defvar app-server-fetch-function #'app-server--fetch
   "Function of (URL METHOD HEADERS BODY THEN CATCH) that makes an HTTP request.
 THEN is called with (:status N :ok BOOLEAN :text STRING), or CATCH with a
 message when there was no response.")
+
+(defvar app-server-curl-program "curl"
+  "The program that fetches https: for an Emacs without GnuTLS.")
 
 (defvar app-server-run-function #'app-server--make-process
   "Function of (COMMAND INPUT THEN) that runs a program; see `app-server-run'.")
@@ -1442,6 +1619,51 @@ studio's browser tab there are no programs, and the request fails."
                            (kill-buffer buffer)
                            (funcall then (list :status (process-exit-status process) :output output))))))))
     (when input (process-send-string process input))
+    (process-send-eof process)))
+
+(defun app-server--fetch (url method headers body then catch)
+  "`app-server-fetch' for a native Emacs: url.el, or for https: in an
+Emacs without GnuTLS (that of a shared host, say), the curl program."
+  (if (and (string-prefix-p "https:" url)
+           (not (and (fboundp 'gnutls-available-p) (gnutls-available-p)))
+           (executable-find app-server-curl-program))
+      (app-server--curl-fetch url method headers body then catch)
+    (app-server--url-fetch url method headers body then catch)))
+
+(defun app-server--curl-fetch (url method headers body then catch)
+  "`app-server-fetch' through the curl program, without waiting."
+  (let* ((buffer (generate-new-buffer " *app-server-curl*"))
+         (arguments
+          (append (list "--silent" "--show-error" "--location" "--max-redirs" "5" "--max-time" "30"
+                        "--request" method "--output" "-" "--write-out" "\n%{http_code}")
+                  (let (list)
+                    (while headers
+                      (push (format "%s: %s" (substring (symbol-name (car headers)) 1)
+                                    (replace-regexp-in-string "[\r\n]" " " (format "%s" (cadr headers))))
+                            list)
+                      (push "--header" list)
+                      (setq headers (cddr headers)))
+                    list)
+                  (and body (list "--data-binary" "@-"))
+                  (list "--url" url)))
+         (process
+          (make-process
+           :name "app-server-curl" :buffer buffer :command (cons app-server-curl-program arguments)
+           :coding 'binary :connection-type 'pipe :noquery t
+           :sentinel
+           (lambda (process _event)
+             (unless (process-live-p process)
+               (let ((output (with-current-buffer buffer (buffer-string)))
+                     (status (process-exit-status process)))
+                 (kill-buffer buffer)
+                 (if (and (eq status 0) (string-match "\n\\([0-9][0-9][0-9]\\)\\'" output))
+                     (let ((code (string-to-number (match-string 1 output))))
+                       (funcall then (list :status code :ok (and (>= code 200) (< code 300) t)
+                                           :text (decode-coding-string (substring output 0 (match-beginning 0))
+                                                                       'utf-8))))
+                   (funcall catch (format "curl: %s"
+                                          (string-trim (replace-regexp-in-string "\n[0-9]*\\'" "" output)))))))))))
+    (when body (process-send-string process (encode-coding-string body 'utf-8)))
     (process-send-eof process)))
 
 (defun app-server--url-fetch (url method headers body then catch)

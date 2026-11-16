@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: 0BSD  (yours to change; no conditions)
 # Run on the host by deploy.sh: put the project that came in INCOMING (a
 # directory of the home directory) in place.
-#   install.sh INCOMING WEB-DIR APP-DIR PUBLIC-ORIGIN
+#   install.sh INCOMING WEB-DIR APP-DIR PUBLIC-ORIGIN [MYSQL-CNF]
 set -eu
 cd "$HOME"
 incoming="$HOME/$1"; web="$HOME/$2"; app="$HOME/$3"; origin="$4"
@@ -23,6 +23,10 @@ chmod 700 "$app" "$app/data"
     --exclude ./.dockerignore --exclude ./README.txt . ) | ( cd "$web" && tar -xf - )
 cp "$app/server/cgi/htaccess" "$web/.htaccess"
 mysql=""; [ -f "$app/my.cnf" ] && mysql="$app/my.cnf"
+if [ -n "${5:-}" ]; then
+  mysql="$HOME/$5"
+  [ -r "$mysql" ] || { echo "install.sh: cannot read $mysql" >&2; exit 1; }
+fi
 cat > "$web/app.cgi" <<CGI
 #!/bin/sh
 # Written by server/cgi/install.sh.  Each request to /api/ starts an Emacs,
@@ -36,7 +40,22 @@ export APP_DIRECTORY APP_DATA APP_MYSQL PUBLIC_ORIGIN
 exec $emacs --batch -Q -l "\$APP_DIRECTORY/server/serve-cgi.el" -f serve-cgi-main
 CGI
 chmod 755 "$web/app.cgi"
+# The jobs of server.el, for cron: APP-DIR/job.sh [NAME].
+cat > "$app/job.sh" <<JOB
+#!/bin/sh
+# Written by server/cgi/install.sh.  Runs the jobs of server.el that are
+# due (app-server-defjob), or the one named, in an Emacs that then ends;
+# one line per job in $app/data/jobs.log.  For cron: $app/job.sh
+APP_DIRECTORY=$app
+APP_DATA=$app/data
+APP_MYSQL=$mysql
+PUBLIC_ORIGIN=$origin
+APP_JOB=\${1:-}
+export APP_DIRECTORY APP_DATA APP_MYSQL PUBLIC_ORIGIN APP_JOB
+exec $emacs --batch -Q -l "\$APP_DIRECTORY/server/serve-cgi.el" -f serve-cgi-jobs-main
+JOB
+chmod 700 "$app/job.sh"
 # Compiled, the server's Lisp loads in a fraction of the time: each request pays it.
 ( cd "$app/server" && rm -f ./*.elc && "$emacs" --batch -Q -L . --eval '(setq byte-compile-warnings nil)' \
     -f batch-byte-compile app-server.el serve-project.el serve-cgi.el >/dev/null 2>&1 )
-echo "install.sh: $origin/ is $web; the server reads $app$( [ -n "$mysql" ] && echo ", data in MySQL" || true )"
+echo "install.sh: $origin/ is $web; the server reads $app$( [ -n "$mysql" ] && echo ", data in MySQL" || true ); jobs: $app/job.sh"
