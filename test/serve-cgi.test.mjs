@@ -6,6 +6,7 @@
 // database they may fill (CI has one); otherwise they are skipped.
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
+import { closeSync, openSync, writeFileSync } from "node:fs";
 import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,6 +30,11 @@ const emacsHasSqlite = hasSqlite();
 /** One request through serve-cgi.el: { status, headers (lower-case names), body }. */
 function cgi(directory, data, method, path, { body = "", cookie, from = origin, host = "example.test", env = {} } = {}) {
   const [pathInfo, query] = path.split("?");
+  // The body comes from a file, as from the pipe of a web server: Node's
+  // own pipes are sockets on Linux, which /dev/stdin cannot open.
+  const input = join(data, "..", `.body-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  writeFileSync(input, body);
+  const stdin = openSync(input, "r");
   return new Promise((resolve, reject) => {
     const child = spawn(emacs, ["--batch", "-Q", "-l", join(root, "tools/serve-cgi.el"), "-f", "serve-cgi-main"], {
       env: {
@@ -40,8 +46,9 @@ function cgi(directory, data, method, path, { body = "", cookie, from = origin, 
         ...(from ? { HTTP_ORIGIN: from } : {}), ...(cookie ? { HTTP_COOKIE: cookie } : {}),
         ...env,
       },
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: [stdin, "pipe", "pipe"],
     });
+    closeSync(stdin);
     const chunks = [], errors = [];
     child.stdout.on("data", (chunk) => chunks.push(chunk));
     child.stderr.on("data", (chunk) => errors.push(chunk));
@@ -64,7 +71,7 @@ function cgi(directory, data, method, path, { body = "", cookie, from = origin, 
       if (status >= 500 && !env.EXPECT_FAILURE) console.error(`serve-cgi ${method} ${path} -> ${status}:\n${stderr}`);
       resolve({ status, headers, body: text.slice(split + 4), stderr });
     });
-    child.stdin.end(body);
+    child.on("close", () => rm(input, { force: true }));
   });
 }
 

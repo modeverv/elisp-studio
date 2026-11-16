@@ -73,7 +73,9 @@ host knows (REMOTE_ADDR, HTTPS) is said in their place."
     (nreverse headers)))
 
 (defun serve-cgi--body (length)
-  "The body of the request: LENGTH bytes of the standard input."
+  "The body of the request: LENGTH bytes of the standard input.
+That is a pipe or a file, as a web server gives a CGI program; not a
+socket, which /dev/stdin cannot open on Linux."
   (if (<= length 0)
       ""
     (with-temp-buffer
