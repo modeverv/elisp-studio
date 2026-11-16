@@ -12,6 +12,9 @@
 # (data/), and my.cnf if the data is in MySQL (server/cgi/make-mycnf.sh).
 # The host's Emacs (27.2 or later) compiles server/ there.  Run it from the
 # project's directory; run it again after a change.
+#
+# APP-DIR/job.sh runs the jobs of server.el (app-server-defjob): give it
+# to cron, every 10 minutes say.
 set -eu
 usage="usage: deploy.sh SSH-HOST WEB-DIR APP-DIR PUBLIC-ORIGIN"
 host="${1:?$usage}"; web="${2:?$usage}"; app="${3:?$usage}"; origin="${4:?$usage}"

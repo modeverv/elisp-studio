@@ -1,4 +1,4 @@
-// The todos example (accounts, each one's todos) in the studio, where its
+// The todos example (accounts, each one's todos and their files) in the studio, where its
 // server.el runs in the browser tab on SQLite and hashes passwords with
 // the browser's Web Crypto.  The same server.el runs on MySQL through
 // tools/serve-cgi.el (test/serve-cgi.test.mjs).
@@ -10,7 +10,7 @@
 //
 // Needs ../wasmacs/docs (built, with SQLite) and ../elisp-react.
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { serve } from "../tools/serve.mjs";
@@ -66,6 +66,24 @@ try {
   await until("Boolean(document.querySelector('.todo.done'))", "a todo is done");
   pass(`todos are added and marked: ${JSON.stringify(await titles())}`);
 
+  // A file for the second todo: the file input of its line, as a visitor chooses one.
+  const note = join(workDir, "メモ.txt");
+  await writeFile(note, "a note for the second todo\n");
+  const { result } = await client.send("Runtime.evaluate", {
+    expression: `${frame}.querySelectorAll('.todo input.file')[1]`,
+  }, sessionId);
+  await client.send("DOM.setFileInputFiles", { files: [note], objectId: result.objectId }, sessionId);
+  await until("document.querySelectorAll('.todo')[1]?.querySelector('.files a')?.textContent === 'メモ.txt'", "the file is listed");
+  pass(`a file is attached: ${await page("document.querySelector('.todo .files li').textContent")}`);
+  // Its link ("api/todos/file?id=N", relative) is a download, under its own name.
+  const downloads = join(workDir, "downloads");
+  await mkdir(downloads);
+  await client.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: downloads });
+  await page("(document.querySelector('.todo .files a').click(), true)");
+  await waitUntil(() => readFile(join(downloads, "メモ.txt"), "utf8").then((text) => text === "a note for the second todo\n", () => false),
+    "the download", 30_000);
+  pass("its link downloads it, named メモ.txt");
+
   await page("(document.querySelector('button.signout').click(), true)");
   await until("Boolean(document.querySelector('form.signin'))", "signed out");
   await type(".name", "studio-user");
@@ -81,7 +99,8 @@ try {
   await type(".name", "studio-user");
   await type(".password", "a long enough password");
   await submit("form.signin");
-  await until("document.querySelectorAll('.todo').length === 2 && Boolean(document.querySelector('.todo.done'))", "the todos after a reload");
+  await until("document.querySelectorAll('.todo').length === 2 && Boolean(document.querySelector('.todo.done'))"
+    + " && document.querySelector('.todo .files a')?.textContent === 'メモ.txt'", "the todos and the file after a reload");
   pass(`after a reload of the studio, signed in again: the same todos ${JSON.stringify(await titles())}`);
   console.log("e2e-todos passed");
 } finally {

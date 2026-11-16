@@ -14,8 +14,16 @@ header .me { color: var(--muted); margin-left: auto; }
 .new { display: flex; gap: .5rem; }
 .new .draft { flex: 1; }
 .todos { list-style: none; padding: 0; margin: 1rem 0; }
-.todo { display: flex; align-items: center; gap: .6rem; padding: .5rem 0; border-bottom: 1px solid var(--line); }
+.todo { padding: .5rem 0; border-bottom: 1px solid var(--line); }
 .todo .title { flex: 1; overflow-wrap: anywhere; }
 .todo.done .title { text-decoration: line-through; color: var(--muted); }
 .todo .remove { background: none; color: var(--muted); padding: 0 .3rem; font-size: 1.2rem; }
 footer { display: flex; justify-content: space-between; color: var(--muted); }
+.todo { display: block; }
+.todo .line { display: flex; align-items: center; gap: .6rem; }
+.todo .attach { cursor: pointer; color: var(--muted); }
+.todo .attach .file { display: none; }
+.todo .files { list-style: none; margin: .3rem 0 0 2rem; padding: 0; font-size: .9rem; }
+.todo .attachment { display: flex; gap: .6rem; align-items: baseline; }
+.todo .attachment .size { color: var(--muted); }
+.todo .detach { background: none; color: var(--muted); padding: 0 .3rem; }

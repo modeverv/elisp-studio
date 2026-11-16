@@ -98,7 +98,7 @@ Emacs でプロジェクトのファイルを開いているときに使える�
 
 サーバーがデータを保持する方法は2つあります。
 
-- `app-server-read` と `app-server-write`：Lisp の値をファイルに保存します。
+- `app-server-read` と `app-server-write`：Lisp の値を名前を付けて保存します。ファイルに置きます。`app-server-mysql` を設定したとき（下の共用ホスト）は、そのデータベースのテーブル `app_server_data` に置きます。切り替える前にファイルに書いた値も読めます。
 - `(app-server-database)`：SQLite のデータベースです。Emacs 自身の `sqlite-execute` と `sqlite-select` で使います。ドライバも別のプログラムも要りません。SQLite は Emacs の一部です。
 
 ```elisp
@@ -118,7 +118,7 @@ Emacs でプロジェクトのファイルを開いているときに使える�
   - **トランザクション**は全部か無しかです。途中でプロセスが終わっても同じです。
   - **セッションとサインインの試行**も同じ切り替えに従います。MySQL では、そのテーブル `app_server_sessions` と `app_server_attempts` に置きます。
 
-  [`examples/todos`](examples/todos) はこれを使っています。名前とパスワードのアカウントがあり、アカウントごとに TODO を持ちます（[試す](https://modeverv.github.io/elisp-studio/?example=todos)）。1つの `server.el` が、studio（タブの中の SQLite）、`run.sh`、MySQL のある共用ホストのどれでも動きます。二通り書くのは `CREATE TABLE` だけです。
+  [`examples/todos`](examples/todos) はこれを使っています。名前とパスワードのアカウントがあり、アカウントごとに TODO とその添付ファイルを持ちます。30日より前に済んだ TODO はジョブが消します（[試す](https://modeverv.github.io/elisp-studio/?example=todos)）。1つの `server.el` が、studio（タブの中の SQLite）、`run.sh`、MySQL のある共用ホストのどれでも動きます。二通り書くのは `CREATE TABLE` だけです。
 
 SQLite の同梱について：SQLite は[パブリックドメイン](https://www.sqlite.org/copyright.html)なので、配布に条件はありません。ブラウザで動く Emacs には、wasmacs がリンクしています（wasmacs の README の「ライセンス」を参照）。ネイティブの Emacs は、SQLite つきでビルドされていれば使えます。通常のパッケージはそうなっています（`(sqlite-available-p)` で確認できます）。このリポジトリにも、ダウンロードしたプロジェクトにも、SQLite 自体は含まれません。
 
@@ -158,13 +158,36 @@ studio では、サーバーの Emacs がそこにプロジェクトのテキス
 
 待てるものは3つあり、どれもサーバーを止めません。
 
-- `(app-server-fetch URL :method :headers :body :then :catch)`：他のサーバーへの HTTP リクエスト。
+- `(app-server-fetch URL :method :headers :body :then :catch)`：他のサーバーへの HTTP リクエスト。GnuTLS のない Emacs（共用ホストのものなど）は、`https:` を `curl` コマンドで取りに行きます。
 - `(app-server-after 秒数 関数)`：一定の時間。
 - `(app-server-run '("program" "argument") :input 文字列 :then 関数)`：プログラム。たとえば、長い計算を任せる2つ目の Emacs です。関数は `(:status 0 :output "...")` を受け取ります。コマンドはシェルを通りません。
 
 `(funcall fail メッセージ [ステータス])` はリクエストを断ります。あとで動く関数の中のエラーも同じ扱いになり、`app-server-deferred-timeout`（30秒）以内に応答されなかったリクエストには 504 が返ります。同じ `server.el` がスタジオの中でも動きます。そこでは、サーバーの Emacs の代わりにページが時間を計り、リクエストを送ります（したがって、他のサイトへのリクエストにはブラウザの制限がかかります。CORS でほかのサイトのページを許可していないサイトには届きません。ローカルの studio の `--native-server` にはこの制限がありません）。プログラムを実行できるのは、ネイティブの Emacs だけです。
 
 計算は「待ち」ではありません。実行中の Emacs Lisp と SQLite は、これまでどおり1つのスレッドを占有します。そのための手段が `app-server-run` です。
+
+### 定期処理（ジョブ）
+
+リクエストへの答えではない仕事もあります。期限の切れたセッションを忘れる、古いデータを消す、15分ごとにフィードを取りに行く、などです。`server.el` で一度名前を付けます。
+
+```elisp
+(app-server-defjob 'app-purge :every 86400 :function #'app-purge)          ; 終わったら戻る
+(app-server-defjob 'app-feed :every 900 :later t                           ; または、終わったら DONE を呼ぶ
+  :function (lambda (done)
+              (app-server-fetch "https://example.com/feed.xml"
+                                :then (lambda (response) (app-server-write "feed" (plist-get response :text)) (funcall done))
+                                :catch (lambda (message) (funcall done message)))))
+```
+
+期限の来たジョブを動かすもの：
+
+| どこで | いつ |
+|---|---|
+| ネイティブの Emacs（`run.sh`） | 1分ごとに、ひとりでに |
+| 共用ホスト（CGI） | `APP-DIR/job.sh` を cron から（下） |
+| スタジオのブラウザのタブ | 動かしません。`(app-server-run-jobs 'NAME)` で手で1つ動かせます |
+
+1つのジョブは、いくつのプロセスが動かそうとしても、同時に1つのプロセスでしか動きません。データベース（SQLite、または MySQL の `app_server_jobs`）がロックと最後に動いた時刻を持つので、1時間前に期限が来たジョブも6回ではなく1回だけ動きます。ジョブにはリクエストがないので、セッションもありません。失敗したジョブはログに残り、決めた時間のあとにまた期限が来ます。すべてのアプリケーションには `app-server-cleanup` というジョブがあり、期限の切れたセッション、古いサインインの試行、書きかけのアップロードを1時間ごとに消します。
 
 ### 閲覧者からのファイル
 
@@ -370,6 +393,8 @@ CGI でしかプログラムを動かせず、常駐するプロセスを終わ�
 - リクエストの間で Lisp の変数に何も残さないこと。次のリクエストは別のプロセスです。データは `app-server-write` か、データベースに置きます。
 - 複数の文で1つの変更をするときは、`app-server-sql-transaction` に入れること。プロセスは途中で終わることがあります。
 
+`server.el` が受け取るファイル（`app-server-upload-p`）は、届くそばから標準入力からデータのディレクトリへ `head` がコピーします。Emacs は通りません。リクエストの本文の大きさには、ホストの上限がかかります。
+
 デプロイは、プロジェクトのディレクトリから SSH でコマンド1つです。
 
 ```sh
@@ -379,7 +404,17 @@ server/cgi/deploy.sh myhost www/todos todos-app https://example.com
 **このコマンドがすること**
 
 - `www/todos`（公開ディレクトリの下）に、ページのファイル、`app.cgi`、`.htaccess` を置きます。`.htaccess` は `/api/...` を `app.cgi` に送ります。
-- `todos-app`（公開ディレクトリの外、権限 700）に、プロジェクトと、ホストの Emacs でコンパイルした `server/`、データのディレクトリを置きます。
+- `todos-app`（公開ディレクトリの外、権限 700）に、プロジェクトと、ホストの Emacs でコンパイルした `server/`、データのディレクトリ、期限の来たジョブを動かす `job.sh` を置きます。
+
+**cron からジョブを動かす**
+
+`job.sh` を cron に登録します（SSH で `crontab -e`、またはホストのコントロールパネル）。
+
+```
+*/10 * * * * /home/ACCOUNT/todos-app/job.sh
+```
+
+10分ごとに Emacs が起動し、期限の来たジョブを動かして終わります。ジョブごとに1行、`todos-app/data/jobs.log` に書きます。`job.sh NAME` は、期限に関係なくそのジョブを1つ動かします。
 
 **データを MySQL に置く場合**
 
@@ -389,19 +424,17 @@ server/cgi/deploy.sh myhost www/todos todos-app https://example.com
 ssh -t myhost sh todos-app/server/cgi/make-mycnf.sh mysql80.ACCOUNT.sakura.ne.jp
 ```
 
-ユーザー、データベース、パスワード（表示しません）を尋ね、接続を確かめます。`app.cgi` はこのファイルの場所（`APP_MYSQL`）だけをサーバーに渡すので、公開ディレクトリにもプロジェクトにもリポジトリにも、パスワードの写しはありません。セッションとサインインの試行もこのデータベースに置きます。
+ユーザー、データベース、パスワード（表示しません）を尋ね、接続を確かめます。`app.cgi` はこのファイルの場所（`APP_MYSQL`）だけをサーバーに渡すので、公開ディレクトリにもプロジェクトにもリポジトリにも、パスワードの写しはありません。セッション、サインインの試行、ジョブ、`app-server-write` の値もこのデータベースに置きます。
+
+データベースはアプリケーションごとに1つ用意してください。`app_server_` で始まるテーブルはそのアプリケーションのもので、セッションもその中にあります。
 
 **さくらのレンタルサーバで試したこと（2026-11-16）**
 
 - **ホスト：** FreeBSD 13.0、ホスト自身の Emacs 27.2（SQLite も GnuTLS もなし）、MySQL 8.0、パスワードのハッシュには Python 3.8 を使いました。
-- **例：** `examples/todos` を Chrome から使いました。アカウント、TODO、間違ったパスワード、サインアウトです。
+- **例：** `examples/todos` を Chrome から使いました。アカウント、TODO、間違ったパスワード、サインアウト。TODO にファイルを添付し、同じバイト列でダウンロードできること、セッションなしでは 401、10 MB を超えると拒否、TODO を消すと一緒に消えることも確かめました。
+- **ジョブ：** `job.sh` が期限の来たジョブを動かし、次の実行では期限前として飛ばすこと。ホストの Emacs の代わりに `curl` が `https:` を取りに行くこと。
 - **速さ：** 1回の答えはホスト上で 60〜90 ms でした（Emacs の起動を含む）。アカウントの作成は 0.5 秒で、ほとんどがパスワードのハッシュです。
 
-**まだないもの**
-
-- 本文の上限を超えるアップロード
-- cron が要る定期処理（#39）
-- GnuTLS のない Emacs での `https:` への `app-server-fetch`（#41）
 
 ### このサーバーの速さ
 

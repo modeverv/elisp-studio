@@ -361,6 +361,14 @@ function requestHeaders(given) {
 }
 
 // The fetch of the application: /api/... goes to the server's Emacs.
+/** Content-Disposition for NAME, as tools/serve-project.el writes it. */
+function disposition(name) {
+  const plain = name.replace(/[^A-Za-z0-9._ -]/g, "_");
+  if (plain === name) return `attachment; filename="${plain}"`;
+  const encoded = encodeURIComponent(name).replace(/['()*!]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${plain}"; filename*=UTF-8''${encoded}`;
+}
+
 async function applicationFetch(url, options = {}) {
   const target = new URL(url, "http://application.invalid/");
   if (target.origin !== "http://application.invalid") return fetch(url, options);
@@ -382,7 +390,7 @@ async function applicationFetch(url, options = {}) {
   const lisp = (status, value, headers = []) => {
     const file = typeof value === "string" ? null : value;
     const response = new Headers({ "Content-Type": file ? file.type : "application/x-emacs-lisp; charset=utf-8" });
-    if (file?.name) response.set("Content-Disposition", `attachment; filename="${file.name.replace(/[^A-Za-z0-9._ -]/g, "_")}"`);
+    if (file?.name) response.set("Content-Disposition", disposition(file.name));
     for (const [name, text] of headers) {
       if (name.toLowerCase() === "set-cookie") keepCookie(text);
       else response.append(name, text);
@@ -534,14 +542,17 @@ async function startPreview(project, why) {
     // frame as a navigation: ask the server here and hand over the file.
     frame.contentDocument.addEventListener("click", async (event) => {
       const link = event.target.closest?.("a[href]");
-      const href = link?.getAttribute("href") || "";
+      // "/api/..." or, as a page on a host's subdirectory writes it, "api/...".
+      const href = (link?.getAttribute("href") || "").replace(/^api\//, "/api/");
       if (!href.startsWith("/api/")) return;
       event.preventDefault();
       const response = await applicationFetch(href);
       if (!response.ok) return showError(`${href}: ${await response.text()}`);
       const save = document.createElement("a");
       save.href = URL.createObjectURL(await response.blob());
-      save.download = /filename="([^"]+)"/.exec(response.headers.get("Content-Disposition") || "")?.[1]
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const encoded = /filename\*=UTF-8''([^;\s]+)/i.exec(disposition)?.[1];
+      save.download = (encoded && decodeURIComponent(encoded)) || /filename="([^"]+)"/.exec(disposition)?.[1]
         || link.getAttribute("download") || "download";
       save.click();
       setTimeout(() => URL.revokeObjectURL(save.href), 60000);

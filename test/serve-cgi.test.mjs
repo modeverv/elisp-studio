@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { closeSync, openSync, writeFileSync } from "node:fs";
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -28,7 +28,7 @@ function hasSqlite() {
 const emacsHasSqlite = hasSqlite();
 
 /** One request through serve-cgi.el: { status, headers (lower-case names), body }. */
-function cgi(directory, data, method, path, { body = "", cookie, from = origin, host = "example.test", env = {} } = {}) {
+function cgi(directory, data, method, path, { body = "", cookie, from = origin, host = "example.test", env = {}, binary = false } = {}) {
   const [pathInfo, query] = path.split("?");
   // The body comes from a file, as from the pipe of a web server: Node's
   // own pipes are sockets on Linux, which /dev/stdin cannot open.
@@ -54,7 +54,8 @@ function cgi(directory, data, method, path, { body = "", cookie, from = origin, 
     child.stderr.on("data", (chunk) => errors.push(chunk));
     child.on("error", reject);
     child.on("close", (code) => {
-      const text = Buffer.concat(chunks).toString("utf8");
+      const bytes = Buffer.concat(chunks);
+      const text = bytes.toString("utf8");
       const split = text.indexOf("\r\n\r\n");
       if (code !== 0 || split < 0) return reject(new Error(`serve-cgi ended with ${code}: ${text}`));
       const headers = {};
@@ -69,9 +70,18 @@ function cgi(directory, data, method, path, { body = "", cookie, from = origin, 
       const stderr = Buffer.concat(errors).toString("utf8");
       // What Emacs said on its error output: the reason of a 500.
       if (status >= 500 && !env.EXPECT_FAILURE) console.error(`serve-cgi ${method} ${path} -> ${status}:\n${stderr}`);
-      resolve({ status, headers, body: text.slice(split + 4), stderr });
+      resolve({ status, headers, body: text.slice(split + 4), stderr,
+                bytes: binary ? bytes.subarray(bytes.indexOf("\r\n\r\n") + 4) : undefined });
     });
     child.on("close", () => rm(input, { force: true }));
+  });
+}
+
+/** job.sh: the jobs that are due, or the one APP_JOB names. */
+function jobs(directory, data, env = {}) {
+  return execFileSync(emacs, ["--batch", "-Q", "-l", join(root, "tools/serve-cgi.el"), "-f", "serve-cgi-jobs-main"], {
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, APP_DIRECTORY: directory, APP_DATA: data, PUBLIC_ORIGIN: origin, ...env },
+    encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
   });
 }
 
@@ -80,6 +90,37 @@ async function project(example) {
   await cp(join(root, example), directory, { recursive: true });
   return { directory, data: join(directory, ".data") };
 }
+
+test("install.sh: the page's files to the web directory, the rest with app.cgi and job.sh outside it", async () => {
+  const home = await mkdtemp(join(tmpdir(), "elisp-studio-install-"));
+  try {
+    // The project as deploy.sh sends it: the download of examples/todos.
+    const incoming = join(home, ".deploy-1");
+    await cp(join(root, "examples/todos"), incoming, { recursive: true });
+    for (const [to, from] of [
+      ["server/serve-project.el", "tools/serve-project.el"], ["server/app-server.el", "lisp/app-server.el"],
+      ["server/serve-cgi.el", "tools/serve-cgi.el"], ["server/cgi/install.sh", "tools/project/cgi/install.sh"],
+      ["server/cgi/htaccess", "tools/project/cgi/htaccess"], ["run.sh", "tools/project/run.sh"],
+      [".gitignore", "tools/project/gitignore"], ["test/run.sh", "tools/project/test/run.sh"],
+    ]) await cp(join(root, from), join(incoming, to));
+    // install.sh takes the `emacs' of the PATH (a script: Emacs.app's binary does not work through a link).
+    await mkdir(join(home, "bin"));
+    await writeFile(join(home, "bin/emacs"), `#!/bin/sh\nexec ${JSON.stringify(emacs)} "$@"\n`, { mode: 0o755 });
+    const env = { PATH: `${join(home, "bin")}:${process.env.PATH}`, HOME: home };
+    const said = execFileSync("sh", [join(incoming, "server/cgi/install.sh"), ".deploy-1", "www/app", "app-dir", origin],
+      { env, encoding: "utf8" });
+    assert.match(said, /https:\/\/example\.test\/ is .*www\/app; the server reads .*app-dir; jobs: .*app-dir\/job\.sh/);
+    assert.deepEqual((await readdir(join(home, "www/app"))).sort(), [".htaccess", "app.cgi", "app.el", "index.html", "style.css"]);
+    assert.equal((await stat(join(home, "app-dir"))).mode & 0o777, 0o700);
+    assert.equal((await stat(join(home, "app-dir/job.sh"))).mode & 0o777, 0o700);
+    await stat(join(home, "app-dir/server/serve-cgi.elc"));
+    await assert.rejects(stat(incoming), "INCOMING is removed");
+    execFileSync(join(home, "app-dir/job.sh"), ["app-server-cleanup"], { env, stdio: "ignore" });
+    assert.match(await readFile(join(home, "app-dir/data/jobs.log"), "utf8"), /app-server-cleanup done\n$/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
 
 test("serve-cgi answers server.el's API with serve-project's checks and headers", async () => {
   const { directory, data } = await project("template");
@@ -141,7 +182,7 @@ async function todosStory(env) {
     const alice = cookieOf(a);
     assert.equal((await ask("POST", "/api/signup", `("${name("a")}" "another password")`)).status, 409);
     const added = await ask("POST", "/api/todos", '"牛乳 & eggs"', alice);
-    assert.match(added.body, /^\(\(:id \d+ :title "牛乳 & eggs" :done nil\)\)$/);
+    assert.match(added.body, /^\(\(:id \d+ :title "牛乳 & eggs" :done nil :files nil\)\)$/);
     const id = Number(added.body.match(/:id (\d+)/)[1]);
     const bob = cookieOf(await ask("POST", "/api/signup", `("${name("b")}" "battery staple b")`));
     // Bob cannot reach Alice's todo.
@@ -156,6 +197,40 @@ async function todosStory(env) {
     assert.equal((await ask("POST", "/api/signin", `("${name("b")}" "battery staple b")`)).status, 429);
     assert.equal((await ask("POST", "/api/signin", `("${name("b")}" "battery staple b")`, undefined,
                             { REMOTE_ADDR: "198.51.100.7" })).status, 200);
+    // A file for a todo: kept outside the web root, given only to its account.
+    const kept = await ask("POST", "/api/todos", '"with a file"', alice);
+    const todo = Number(kept.body.match(/:id (\d+) :title "with a file"/)[1]);
+    const bytes = Buffer.from([0, 1, 2, 255, 254, 10, 13, 0x41]);
+    const attached = await cgi(directory, data, "POST", `/api/todos/attach?id=${todo}&name=${encodeURIComponent("メモ v1.bin")}`,
+      { body: bytes, cookie: alice, env: { ...env, CONTENT_TYPE: "application/octet-stream" } });
+    assert.equal(attached.status, 200, attached.body);
+    const file = Number(attached.body.match(/:files \(\(:id (\d+) :name "メモ v1\.bin" :size 8\)\)/)[1]);
+    const back = await cgi(directory, data, "GET", `/api/todos/file?id=${file}`, { cookie: alice, env, binary: true });
+    assert.equal(back.status, 200);
+    assert.deepEqual(back.bytes, bytes);
+    assert.equal(back.headers["content-disposition"], `attachment; filename="__ v1.bin"; filename*=UTF-8''%E3%83%A1%E3%83%A2%20v1.bin`);
+    assert.equal((await cgi(directory, data, "GET", `/api/todos/file?id=${file}`, { cookie: bob, env })).status, 404);
+    // Too large: refused before the body is taken.
+    assert.equal((await cgi(directory, data, "POST", `/api/todos/attach?id=${todo}&name=big`,
+      { body: "x", cookie: alice, env: { ...env, CONTENT_LENGTH: String(20 * 1024 * 1024) } })).status, 413);
+    // The job: a todo done more than 30 days ago goes, with its file; the others stay.
+    assert.match((await ask("POST", "/api/todos/toggle", String(todo), alice)).body, /"with a file" :done t/);
+    assert.match(jobs(directory, data, { ...env, APP_JOB: "todos-purge" }), /^$/);
+    assert.match((await ask("GET", "/api/todos", "", alice)).body, /"with a file"/, "done today: kept");
+    const sql = env.APP_MYSQL
+      ? (statement) => execFileSync("mysql", [`--defaults-extra-file=${env.APP_MYSQL}`, "-e", statement])
+      : (statement) => execFileSync(emacs, ["--batch", "-Q", "--eval",
+          `(let ((db (sqlite-open ${JSON.stringify(join(data, "app.db"))}))) (sqlite-execute db ${JSON.stringify(statement)}))`]);
+    sql(`UPDATE todo_done SET at = at - ${31 * 86400} WHERE item_id = ${todo}`);
+    jobs(directory, data, { ...env, APP_JOB: "todos-purge" });
+    assert.doesNotMatch((await ask("GET", "/api/todos", "", alice)).body, /"with a file"/, "done 31 days ago: gone");
+    assert.equal((await cgi(directory, data, "GET", `/api/todos/file?id=${file}`, { cookie: alice, env })).status, 404);
+    // The jobs that are due, then none: each once in its time.
+    jobs(directory, data, env);
+    const log = await readFile(join(data, "jobs.log"), "utf8");
+    assert.match(log, /app-server-cleanup done/);
+    jobs(directory, data, env);
+    assert.match(await readFile(join(data, "jobs.log"), "utf8"), /app-server-cleanup not-due/);
     await ask("POST", "/api/signout", "", alice);
     assert.equal((await ask("GET", "/api/me", "", alice)).body, "nil");
   } finally {
@@ -168,8 +243,85 @@ test("the todos example through serve-cgi on SQLite: accounts, each one's todos,
 
 test("the todos example through serve-cgi on MySQL", { skip: !mysql && "APP_SERVER_TEST_MYSQL is not set" }, async () => {
   execFileSync("mysql", [`--defaults-extra-file=${mysql}`, "-e",
-    "DROP TABLE IF EXISTS todo_items, todo_users, app_server_sessions, app_server_attempts"]);
+    "DROP TABLE IF EXISTS todo_files, todo_done, todo_items, todo_users, app_server_sessions, app_server_attempts, app_server_jobs"]);
   await todosStory({ APP_MYSQL: mysql });
+});
+
+test("app-server-read and app-server-write keep their values in MySQL, and still read an older file",
+  { skip: !mysql && "APP_SERVER_TEST_MYSQL is not set" }, async () => {
+    const data = await mkdtemp(join(tmpdir(), "elisp-studio-kv-"));
+    try {
+      execFileSync("mysql", [`--defaults-extra-file=${mysql}`, "-e", "DELETE FROM app_server_data WHERE name IN ('kv-test', 'kv-old')"],
+        { stdio: "ignore" }).toString?.();
+    } catch (_) { /* the table is made at need */ }
+    try {
+      const out = execFileSync(emacs, ["--batch", "-Q", "-l", join(root, "lisp/app-server.el"), "--eval", `(progn
+        (setq app-server-data-directory ${JSON.stringify(data + "/")})
+        (app-server-write "kv-old" '(:kept "in a file"))
+        (setq app-server-mysql ${JSON.stringify(mysql)})
+        (app-server-write "kv-test" '(:title "日本語" :n 3))
+        (app-server-write "kv-test" '(:title "again" :n 4))
+        (prin1 (list (app-server-read "kv-test") (app-server-read "kv-old") (app-server-read "kv-none" 'nothing)
+                     (app-server-sql-select "SELECT name FROM app_server_data WHERE name = ?" (list "kv-test")))))`],
+        { encoding: "utf8" });
+      assert.equal(out, '((:title "again" :n 4) (:kept "in a file") nothing (("kv-test")))');
+    } finally {
+      await rm(data, { recursive: true, force: true });
+    }
+  });
+
+test("a job of 900 seconds from cron every 15 minutes runs every 15 minutes (database or files)", async () => {
+  for (const files of [false, true]) {
+    const data = await mkdtemp(join(tmpdir(), "elisp-studio-jobs-"));
+    try {
+      const out = execFileSync(emacs, ["--batch", "-Q", "-l", join(root, "lisp/app-server.el"), "--eval", `(progn
+        (setq app-server-data-directory ${JSON.stringify(data + "/")})
+        (let ((runs nil) (now (float-time)))
+          (app-server-defjob 'every-900 :every 900 :function (lambda () (push (round (- (float-time) now)) runs)))
+          (cl-letf (((symbol-function 'app-server--own-database) ${files ? "#'ignore" : "(symbol-function 'app-server--own-database)"}))
+            ;; The start of each cron run, a moment late or early.
+            (dolist (at '(0.4 899.6 1200.2 1800.3 2699.9))
+              (cl-letf (((symbol-function 'float-time) (lambda (&optional _) (+ now at))))
+                (app-server-run-jobs))))
+          (prin1 (reverse runs))))`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      assert.equal(out, "(0 900 1800 2700)", files ? "files" : "database");
+    } finally {
+      await rm(data, { recursive: true, force: true });
+    }
+  }
+});
+
+test("app-server-fetch through curl (an Emacs without GnuTLS): status, text, headers, body, no answer", async () => {
+  const { createServer } = await import("node:http");
+  const server = createServer((request, response) => {
+    let body = "";
+    request.on("data", (chunk) => (body += chunk));
+    request.on("end", () => {
+      if (request.url === "/missing") { response.writeHead(404); response.end("no"); return; }
+      response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+      response.end(`${request.method} ${request.headers["x-test"] || "-"} ${body} 日本`);
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const run = (form) => new Promise((resolve, reject) => {
+      const child = spawn(emacs, ["--batch", "-Q", "-l", join(root, "lisp/app-server.el"), "--eval", `(let ((done nil))
+        ${form}
+        (while (not done) (accept-process-output nil 0.05)))`], { stdio: ["ignore", "pipe", "pipe"] });
+      let out = "";
+      child.stdout.on("data", (chunk) => (out += chunk));
+      child.on("close", (code) => (code === 0 ? resolve(out) : reject(new Error(`emacs ended with ${code}`))));
+    });
+    const fetched = (url, args = "") => run(`(app-server--curl-fetch ${JSON.stringify(url)} ${args || '"GET" nil nil'}
+      (lambda (response) (prin1 response) (setq done t)) (lambda (message) (prin1 (list :catch message)) (setq done t)))`);
+    assert.equal(await fetched(`${base}/x`), '(:status 200 :ok t :text "GET -  日本")');
+    assert.equal(await fetched(`${base}/x`, `"POST" '(:x-test "yes") "the body"`), '(:status 200 :ok t :text "POST yes the body 日本")');
+    assert.equal(await fetched(`${base}/missing`), '(:status 404 :ok nil :text "no")');
+    assert.match(await fetched("http://127.0.0.1:1/"), /^\(:catch "curl: .*"\)$/);
+  } finally {
+    server.close();
+  }
 });
 
 test("app-server-sql on MySQL: values, errors, transactions, and a process killed in one",

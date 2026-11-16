@@ -55,6 +55,7 @@
 (defvar serve-project-port 8018)
 (defvar serve-project--process nil)
 (defvar serve-project--sweeper nil)
+(defvar serve-project--jobs nil "The timer that runs the jobs that are due.")
 
 (defvar serve-project-origins
   (mapcar (lambda (origin) (string-trim-right origin "/+"))
@@ -522,6 +523,19 @@ anything itself."
      (encode-coding-string (serve-project--fill-page html page) 'utf-8)
      (serve-project--merge-headers '(("Cache-Control" . "no-cache")) (serve-project--file-headers path)))))
 
+(defun serve-project--disposition (name)
+  "Content-Disposition for a download called NAME: a plain name that every
+browser takes, and NAME itself (RFC 6266) when it is more than that."
+  (let ((plain (replace-regexp-in-string "[^A-Za-z0-9._ -]" "_" name)))
+    (if (equal plain name)
+        (format "attachment; filename=\"%s\"" plain)
+      (format "attachment; filename=\"%s\"; filename*=UTF-8''%s" plain
+              (mapconcat (lambda (byte)
+                           (if (or (<= ?a byte ?z) (<= ?A byte ?Z) (<= ?0 byte ?9) (memq byte '(?- ?. ?_ ?~)))
+                               (string byte)
+                             (format "%%%02X" byte)))
+                         (encode-coding-string name 'utf-8) "")))))
+
 (defun serve-project--answer (process status text headers &optional close)
   "Send the answer of server.el: STATUS, TEXT (printed Lisp data), HEADERS.
 TEXT is (:file FILE :type TYPE :name NAME) when the answer is a file."
@@ -536,9 +550,7 @@ TEXT is (:file FILE :type TYPE :name NAME) when the answer is a file."
                                 (encode-coding-string text 'utf-8) headers close)
       (let* ((name (plist-get text :name))
              (headers (if name
-                          (cons (cons "Content-Disposition"
-                                      (format "attachment; filename=\"%s\""
-                                              (replace-regexp-in-string "[^A-Za-z0-9._ -]" "_" name)))
+                          (cons (cons "Content-Disposition" (serve-project--disposition name))
                                 headers)
                         headers))
              ;; The handler has decided that this visitor gets the file;
@@ -973,6 +985,11 @@ many."
                               :log #'serve-project--accepted
                               :filter #'serve-project--filter
                               :sentinel #'serve-project--sentinel))
+  ;; The jobs of server.el (`app-server-defjob'): every minute, those that
+  ;; are due.  Workers that share the data take turns (the database's lock).
+  (when serve-project--jobs (cancel-timer serve-project--jobs))
+  (setq serve-project--jobs
+        (run-at-time 60 60 (lambda () (serve-project--guarded (app-server-run-jobs nil t)))))
   (when serve-project--sweeper (cancel-timer serve-project--sweeper))
   (let ((every (max 1 (min 5 serve-project-request-timeout serve-project-idle-timeout
                             serve-project-send-timeout))))

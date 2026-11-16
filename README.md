@@ -98,7 +98,7 @@ Signing in is made of these; the section "Signing in" below has it whole.
 
 The server can keep data in two ways:
 
-- `app-server-read` and `app-server-write`: Lisp values in files.
+- `app-server-read` and `app-server-write`: Lisp values under a name, in files; with `app-server-mysql` set (a shared host, below), in that database's table `app_server_data`. A value written before the switch is still read from its file.
 - `(app-server-database)`: an SQLite database, used with Emacs's own `sqlite-execute` and `sqlite-select`. No driver and no other program is involved: SQLite is part of Emacs.
 
 ```elisp
@@ -118,7 +118,7 @@ The server can keep data in two ways:
   - **A transaction** is all or nothing, also when the process ends in its middle.
   - **Sessions and sign-in attempts** follow the same choice: with MySQL they are its tables `app_server_sessions` and `app_server_attempts`.
 
-  [`examples/todos`](examples/todos) uses them: accounts with a name and a password, and each account's own todos ([try it](https://modeverv.github.io/elisp-studio/?example=todos)). The one `server.el` runs in the studio (SQLite in the tab), under `run.sh`, and on a shared host with MySQL; only its `CREATE TABLE`s are written twice.
+  [`examples/todos`](examples/todos) uses them: accounts with a name and a password, each account's own todos with their files, and a job that deletes todos done more than 30 days ago ([try it](https://modeverv.github.io/elisp-studio/?example=todos)). The one `server.el` runs in the studio (SQLite in the tab), under `run.sh`, and on a shared host with MySQL; only its `CREATE TABLE`s are written twice.
 
 About bundling SQLite: it is in the [public domain](https://www.sqlite.org/copyright.html), so there are no conditions on shipping it. The Emacs that runs in the browser has it linked in by wasmacs (see "Licence" there); a native Emacs has it if it was built with SQLite, which the usual packages are (`(sqlite-available-p)` tells). Nothing of SQLite is in this repository or in a downloaded project.
 
@@ -158,13 +158,36 @@ A handler that has to wait for something need not make every other request wait 
 
 There are three things to wait for, none of which blocks:
 
-- `(app-server-fetch URL :method :headers :body :then :catch)`: an HTTP request to another server.
+- `(app-server-fetch URL :method :headers :body :then :catch)`: an HTTP request to another server. An Emacs without GnuTLS (that of a shared host, say) fetches `https:` with the `curl` program.
 - `(app-server-after SECONDS FUNCTION)`: a moment.
 - `(app-server-run '("program" "argument") :input STRING :then FUNCTION)`: a program, a second Emacs for long computations for instance. The function gets `(:status 0 :output "...")`. No shell reads the command.
 
 `(funcall fail MESSAGE [STATUS])` refuses the request, an error in a function that runs later does the same, and a request that is not answered within `app-server-deferred-timeout` (30 seconds) gets a 504. The same `server.el` works in the studio, where the page keeps the time and makes the requests for the server's Emacs (so the browser's rules for requests to other sites apply there: a site that does not allow pages of other sites with CORS cannot be reached; the local studio's `--native-server` has no such limit); programs exist only under a native Emacs.
 
 Computing is not waiting: Emacs Lisp that runs, and SQLite, still hold the one thread. That is what `app-server-run` is for.
+
+### Jobs
+
+Some work is not an answer to a request: forgetting expired sessions, deleting old data, fetching a feed every 15 minutes. `server.el` names it once:
+
+```elisp
+(app-server-defjob 'app-purge :every 86400 :function #'app-purge)          ; returns when it is done
+(app-server-defjob 'app-feed :every 900 :later t                           ; or calls DONE when it is
+  :function (lambda (done)
+              (app-server-fetch "https://example.com/feed.xml"
+                                :then (lambda (response) (app-server-write "feed" (plist-get response :text)) (funcall done))
+                                :catch (lambda (message) (funcall done message)))))
+```
+
+Who runs the jobs that are due:
+
+| Where | When |
+|---|---|
+| a native Emacs (`run.sh`) | every minute, by itself |
+| a shared host (CGI) | `APP-DIR/job.sh`, from cron (below) |
+| the studio's browser tab | not at all; `(app-server-run-jobs 'NAME)` runs one by hand |
+
+A job runs in one process at a time, however many ask: the database (SQLite, or MySQL's `app_server_jobs`) holds a lock and the time of the last run, so a job that was due an hour ago runs once, not 6 times. A job gets no request, so no session; one that fails is logged and is due again after its time. `app-server-cleanup`, a job of every application, forgets expired sessions, old sign-in attempts and half-written uploads every hour.
 
 ### Files from visitors
 
@@ -370,6 +393,8 @@ Some hosts (Sakura's rental server, for one) run programs only as CGI and end an
 - Keep nothing in Lisp variables between requests: the next one is another process. Keep data with `app-server-write` or in the database.
 - Put a change of several statements in `app-server-sql-transaction`: a process may be ended in the middle.
 
+A file that `server.el` takes (`app-server-upload-p`) is copied from the standard input to the data directory as it arrives, by `head`, not through Emacs; the host's limit on a request body applies.
+
 Deployment is one command, over SSH, from the project's directory:
 
 ```sh
@@ -379,7 +404,17 @@ server/cgi/deploy.sh myhost www/todos todos-app https://example.com
 **What it does**
 
 - `www/todos` (under the web root) gets the page's files, `app.cgi` and a `.htaccess`, which sends `/api/...` to `app.cgi`.
-- `todos-app` (outside the web root, mode 700) gets the project, `server/` compiled by the host's Emacs, and the data directory.
+- `todos-app` (outside the web root, mode 700) gets the project, `server/` compiled by the host's Emacs, the data directory, and `job.sh`, which runs the jobs that are due.
+
+**Jobs from cron**
+
+Give `job.sh` to cron (`crontab -e` over SSH, or the host's control panel):
+
+```
+*/10 * * * * /home/ACCOUNT/todos-app/job.sh
+```
+
+Every 10 minutes an Emacs starts, runs the jobs that are due and ends; each writes a line to `todos-app/data/jobs.log`. `job.sh NAME` runs one job, due or not.
 
 **Data in MySQL**
 
@@ -389,19 +424,17 @@ The password is kept in one place: `todos-app/my.cnf`, mode 600. Write that file
 ssh -t myhost sh todos-app/server/cgi/make-mycnf.sh mysql80.ACCOUNT.sakura.ne.jp
 ```
 
-It asks for the user, the database and the password, which it does not show, and tests the connection. `app.cgi` gives the server the file's path (`APP_MYSQL`), so no copy of the password is in the web root, the project or the repository. Sessions and sign-in attempts are in that database too.
+It asks for the user, the database and the password, which it does not show, and tests the connection. `app.cgi` gives the server the file's path (`APP_MYSQL`), so no copy of the password is in the web root, the project or the repository. Sessions, sign-in attempts, jobs and `app-server-write`'s values are in that database too.
+
+Give each application a database of its own: the `app_server_` tables are the application's, sessions among them.
 
 **Tried on Sakura's rental server (2026-11-16)**
 
 - **The host:** FreeBSD 13.0, its own Emacs 27.2 (no SQLite or GnuTLS), MySQL 8.0, Python 3.8 for password hashes.
-- **The example:** `examples/todos`, used from Chrome — accounts, todos, a wrong password, signing out.
+- **The example:** `examples/todos`, used from Chrome — accounts, todos, a wrong password, signing out; a file attached to a todo and downloaded with the same bytes, refused without the session (401) and above 10 MB, gone with its todo.
+- **Jobs:** `job.sh` runs the jobs that are due, and the next run finds them not due; `curl` fetches `https:` for the host's Emacs.
 - **Speed:** an answer takes 60–90 ms on the host, Emacs's start included. A sign-up takes 0.5 s, mostly the password hash.
 
-**Not there yet**
-
-- uploads larger than the body limit
-- scheduled work, which would need cron ([#39](https://github.com/modeverv/elisp-studio/issues/39))
-- `app-server-fetch` over `https:` with an Emacs that has no GnuTLS ([#41](https://github.com/modeverv/elisp-studio/issues/41))
 
 ### How fast is that server?
 

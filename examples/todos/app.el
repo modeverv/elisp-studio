@@ -3,7 +3,15 @@
 ;; The page.  server.el keeps the accounts and the todos; this file signs
 ;; in, and shows and changes the todos of the account signed in.  The
 ;; session is a cookie that neither this Lisp nor a script can read
-;; (HttpOnly): the page asks /api/me who it is.
+;; (HttpOnly): the page asks /api/me who it is.  A todo may have files:
+;; `react-fetch' sends one as it is (:file), and a link brings it back.
+
+(require 'url-util)
+
+(defun todos-size (bytes)
+  (cond ((< bytes 1024) (format "%d B" bytes))
+        ((< bytes (* 1024 1024)) (format "%.0f KB" (/ bytes 1024.0)))
+        (t (format "%.1f MB" (/ bytes 1048576.0)))))
 
 (defun todos-api (method path &optional data)
   "An awaitable for a request to server.el.  Its value is Lisp data; a
@@ -64,16 +72,47 @@ refusal rejects with the server's text."
 
 (react-define-component 'Todo
   :pure t
+  :initial-state (lambda (_props) (list :sending nil))
   :render
   (lambda (self)
     (let ((todo (react-props self :todo)))
       (jsx (li (:class (if (plist-get todo :done) "todo done" "todo"))
-             (input (:class "toggle" :type "checkbox" :checked (plist-get todo :done)
-                     :on-change (lambda (_event) (funcall (react-props self :on-toggle) (plist-get todo :id)))))
-             (span (:class "title") (plist-get todo :title))
-             (button (:class "remove" :title "remove"
-                      :on-click (lambda (_event) (funcall (react-props self :on-remove) (plist-get todo :id))))
-               "×"))))))
+             (div (:class "line")
+               (input (:class "toggle" :type "checkbox" :checked (plist-get todo :done)
+                       :on-change (lambda (_event) (funcall (react-props self :on-toggle) (plist-get todo :id)))))
+               (span (:class "title") (plist-get todo :title))
+               (label (:class "attach" :title "attach a file")
+                 (if (react-state self :sending) "…" "📎")
+                 (input (:class "file" :type "file" :ref "file"
+                         :on-change
+                         (lambda (event)
+                           (let* ((files (plist-get event :files))
+                                  (chosen (and (> (length files) 0) (aref files 0))))
+                             (when chosen
+                               (react-set-state self :sending t)
+                               (react-fetch (format "api/todos/attach?id=%d&name=%s" (plist-get todo :id)
+                                                    (url-hexify-string (plist-get chosen :name)))
+                                            :method "POST" :file (react-ref self "file")
+                                            :then (lambda (response)
+                                                    (react-set-state self :sending nil)
+                                                    (funcall (react-props self :on-answer) response))
+                                            :catch (lambda (message)
+                                                     (react-set-state self :sending nil)
+                                                     (funcall (react-props self :on-answer) (list :ok nil :text (prin1-to-string message)))))))))))
+               (button (:class "remove" :title "remove"
+                        :on-click (lambda (_event) (funcall (react-props self :on-remove) (plist-get todo :id))))
+                 "×"))
+             (and (plist-get todo :files)
+                  (jsx (ul (:class "files")
+                         (mapcar (lambda (file)
+                                   (jsx (li (:key (plist-get file :id) :class "attachment")
+                                          (a (:href (format "api/todos/file?id=%d" (plist-get file :id))) (plist-get file :name))
+                                          (span (:class "size") (todos-size (plist-get file :size)))
+                                          (button (:class "detach" :title "remove the file"
+                                                   :on-click (lambda (_event)
+                                                               (funcall (react-props self :on-detach) (plist-get file :id))))
+                                            "×"))))
+                                 (plist-get todo :files))))))))))
 
 (react-define-component 'Todos
   :initial-state (lambda (_props) (list :todos nil :draft "" :error nil))
@@ -102,7 +141,14 @@ refusal rejects with the server's text."
                (mapcar (lambda (todo)
                          (jsx (Todo (:key (plist-get todo :id) :todo todo
                                      :on-toggle (lambda (id) (todos-ask self "POST" "api/todos/toggle" id))
-                                     :on-remove (lambda (id) (todos-ask self "POST" "api/todos/remove" id))))))
+                                     :on-remove (lambda (id) (todos-ask self "POST" "api/todos/remove" id))
+                                     :on-detach (lambda (id) (todos-ask self "POST" "api/todos/detach" id))
+                                     ;; The answer of an upload: the list, or why not.
+                                     :on-answer (lambda (response)
+                                                  (let ((value (ignore-errors (car (read-from-string (plist-get response :text))))))
+                                                    (if (plist-get response :ok)
+                                                        (react-set-state self :error nil :todos value)
+                                                      (react-set-state self :error (if (stringp value) value "The file did not go")))))))))
                        todos))
              (footer
                (span (:class "count") (format "%d left of %d" left (length todos)))
