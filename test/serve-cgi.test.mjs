@@ -42,8 +42,9 @@ function cgi(directory, data, method, path, { body = "", cookie, from = origin, 
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
-    const chunks = [];
+    const chunks = [], errors = [];
     child.stdout.on("data", (chunk) => chunks.push(chunk));
+    child.stderr.on("data", (chunk) => errors.push(chunk));
     child.on("error", reject);
     child.on("close", (code) => {
       const text = Buffer.concat(chunks).toString("utf8");
@@ -58,7 +59,10 @@ function cgi(directory, data, method, path, { body = "", cookie, from = origin, 
         if (name === "status") status = Number(value.split(" ")[0]);
         else headers[name] = headers[name] ? `${headers[name]}\n${value}` : value;
       }
-      resolve({ status, headers, body: text.slice(split + 4) });
+      const stderr = Buffer.concat(errors).toString("utf8");
+      // What Emacs said on its error output: the reason of a 500.
+      if (status >= 500 && !env.EXPECT_FAILURE) console.error(`serve-cgi ${method} ${path} -> ${status}:\n${stderr}`);
+      resolve({ status, headers, body: text.slice(split + 4), stderr });
     });
     child.stdin.end(body);
   });
