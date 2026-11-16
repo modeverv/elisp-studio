@@ -13,10 +13,11 @@ emacs="$(command -v emacs || true)"
   || { echo "install.sh: the host's Emacs is older than 27.2" >&2; exit 1; }
 umask 022
 mkdir -p "$app" "$web" "$app/data"
-chmod 700 "$app" "$app/data"
 # The whole project to APP-DIR (outside the web root), over what was there;
 # the data directory and my.cnf stay.
 ( cd "$incoming" && tar -cf - . ) | ( cd "$app" && tar -xf - )
+# After the copy: GNU tar gives APP-DIR the mode of INCOMING's '.'.
+chmod 700 "$app" "$app/data"
 # The page's files to WEB-DIR: not the server's, and no hidden files
 # ('./.*' would be './' itself to bsdtar, and nothing would go).
 ( cd "$incoming" && tar -cf - --exclude './.?*' --exclude ./server --exclude ./server.el --exclude ./api --exclude ./test \
