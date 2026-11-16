@@ -57,12 +57,14 @@ chmod 700 "$app/job.sh"
 # Compiled, the server's Lisp loads in a fraction of the time: each request pays it.
 ( cd "$app/server" && rm -f ./*.elc && "$emacs" --batch -Q -L . --eval '(setq byte-compile-warnings nil)' \
     -f batch-byte-compile app-server.el serve-project.el serve-cgi.el >/dev/null 2>&1 )
-# elisp-next's shared/ and api/ too, when the project has it: compiled the
+# elisp-next, its shared/ and api/ too, when the project has it: compiled the
 # same way, with what they use loaded; a file that does not compile is
 # loaded as it is.  Old .elc files go first (tar keeps the dates of the
 # sources, which may be older than they).
 if [ -f "$app/vendor/elisp-next/lisp/nextel-server.el" ]; then
-  ( cd "$app" && find shared api -name '*.elc' -exec rm -f {} + 2>/dev/null || true
+  ( cd "$app" && find shared api vendor/elisp-next/lisp -name '*.elc' -exec rm -f {} + 2>/dev/null || true
+    ( cd vendor/elisp-next/lisp && "$emacs" --batch -Q -L . --eval '(setq byte-compile-warnings nil)' \
+        -f batch-byte-compile nextel-schema.el nextel-route.el nextel-server.el >/dev/null 2>&1 || true )
     "$emacs" --batch -Q --eval '(setq byte-compile-warnings nil load-prefer-newer t)' \
       -l "$app/server/app-server.elc" -l "$app/vendor/elisp-next/lisp/nextel-server.el" \
       --eval '(let ((app-server-project-directory default-directory) (nextel-server-lazy t))
