@@ -60,13 +60,30 @@
 ;;                                           `sqlite-execute' and `sqlite-select'
 ;;
 ;; SQLite is part of Emacs (29 and later, when Emacs was built with it; the
-;; Emacs of wasmacs is).
+;; Emacs of wasmacs is).  Where the data has to be in MySQL (a shared host,
+;; whose Emacs may also be older and without SQLite), `app-server-sql-select',
+;; `app-server-sql-execute', `app-server-sql-insert' and
+;; `app-server-sql-transaction' work on either: SQLite by default, MySQL
+;; when `app-server-mysql' names its option file.  Sessions and attempts
+;; follow them.
+;;
+;; The server side runs on GNU Emacs 27.2 and later: what a shared host may
+;; have (the CGI front end, tools/serve-cgi.el).
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'seq)
+(require 'subr-x)
 (require 'url-util)
+(require 'json)
+
+;; Emacs 27, which a shared host may have, has no `string-search' (28).
+(unless (fboundp 'string-search)
+  (defun string-search (needle haystack &optional start-pos)
+    "Position of the string NEEDLE in HAYSTACK, or nil (as Emacs 28's)."
+    (let ((case-fold-search nil))
+      (string-match (regexp-quote needle) haystack start-pos))))
 
 (defvar app-server-data-directory "/data/"
   "Where `app-server-write' keeps its files.")
@@ -809,6 +826,315 @@ except Exception:
 ;; several workers share them and a restart does not sign everyone out.
 ;; In an Emacs without SQLite they are kept in memory.
 
+;;;; SQL on SQLite or MySQL
+
+(define-error 'app-server-sql-error "SQL error")
+(declare-function sqlite-transaction "sqlite.c")
+(declare-function sqlite-commit "sqlite.c")
+(declare-function sqlite-rollback "sqlite.c")
+
+(defvar app-server-mysql nil
+  "nil, or the MySQL option file of the application's database.
+Then `app-server-sql-select' and the rest use MySQL, through the `mysql'
+client, and so do sessions and attempts.  The file has the connection
+settings and the password ([client] host, user, password; [mysql]
+database).  Keep it outside the web root, mode 600: it is the one place
+the password is.  From the environment: APP_MYSQL.")
+
+(defvar app-server-mysql-program "mysql" "The MySQL client.")
+
+(defvar app-server-mysql-timeout 20
+  "Seconds one statement may take before its connection is closed.")
+
+(defvar app-server-mysql-keep nil
+  "Non-nil: keep one MySQL connection for the life of this Emacs.
+For a process that answers one request (tools/serve-cgi.el); a server
+that answers many at once opens one per statement or transaction.")
+
+(defvar app-server--mysql-process nil
+  "The connection of the transaction under way, or the kept one.")
+(defvar app-server--mysql-count 0)
+
+(defun app-server-sql-backend ()
+  "`mysql' or `sqlite': where `app-server-sql-select' and the rest go."
+  (if app-server-mysql 'mysql 'sqlite))
+
+(defun app-server--sql-literal-end (sql i)
+  "The index after the quoted text that starts at I in SQL."
+  (let ((quote (aref sql i)) (n (length sql)) (j (1+ i)) end)
+    (while (and (not end) (< j n))
+      (let ((c (aref sql j)))
+        (cond ((and (eq c ?\\) (not (eq quote ?`))) (setq j (+ j 2)))
+              ((eq c quote) (if (and (< (1+ j) n) (eq (aref sql (1+ j)) quote))
+                                (setq j (+ j 2))
+                              (setq end (1+ j))))
+              (t (setq j (1+ j))))))
+    (or end n)))
+
+(defun app-server--sql-mask (sql &optional nested)
+  "SQL with its quoted text and comments made blanks, the same length.
+With NESTED, also what is inside parentheses (they stay)."
+  (let ((out (copy-sequence sql)) (n (length sql)) (i 0) (depth 0))
+    (cl-flet ((blank (from to) (cl-loop for k from from below (min to n) do (aset out k ?\s))))
+      (while (< i n)
+        (let ((c (aref sql i)) (next (and (< (1+ i) n) (aref sql (1+ i)))))
+          (cond ((memq c '(?' ?\" ?`))
+                 (let ((end (app-server--sql-literal-end sql i)))
+                   (blank i end) (setq i end)))
+                ((or (eq c ?#) (and (eq c ?-) (eq next ?-)))
+                 (let ((end (or (string-match "\n" sql i) n)))
+                   (blank i end) (setq i end)))
+                ((and (eq c ?/) (eq next ?*))
+                 (let ((end (if (string-match "\\*/" sql (+ i 2)) (match-end 0) n)))
+                   (blank i end) (setq i end)))
+                ((and nested (eq c ?\())
+                 (when (> depth 0) (aset out i ?\s))
+                 (setq depth (1+ depth) i (1+ i)))
+                ((and nested (eq c ?\)))
+                 (setq depth (max 0 (1- depth)))
+                 (when (> depth 0) (aset out i ?\s))
+                 (setq i (1+ i)))
+                (t (when (and nested (> depth 0)) (aset out i ?\s))
+                   (setq i (1+ i)))))))
+    out))
+
+(defun app-server--mysql-literal (value)
+  "VALUE as MySQL text that is never read as SQL: text goes as hex."
+  (cond ((null value) "NULL")
+        ((eq value t) "TRUE")
+        ((integerp value) (number-to-string value))
+        ((floatp value)
+         (when (or (isnan value) (= value 1.0e+INF) (= value -1.0e+INF))
+           (signal 'app-server-sql-error (list nil (format "Not a number SQL can keep: %S" value))))
+         (format "%.17g" value))
+        ((stringp value)
+         (let ((bytes (if (multibyte-string-p value) (encode-coding-string value 'utf-8) value)))
+           (if (and (not (multibyte-string-p value)) (string-match-p "[\x80-\xff]" value))
+               ;; Bytes, not text.
+               (concat "X'" (mapconcat (lambda (byte) (format "%02X" byte)) bytes "") "'")
+             (concat "CONVERT(X'" (mapconcat (lambda (byte) (format "%02X" byte)) bytes "")
+                     "' USING utf8mb4)"))))
+        (t (signal 'app-server-sql-error (list nil (format "Not a value for SQL: %S" value))))))
+
+(defun app-server--mysql-bind (sql params)
+  "SQL with each ? (outside quotes and comments) replaced by one of PARAMS."
+  (let ((mask (app-server--sql-mask sql)) (parts nil) (from 0) (start 0))
+    (while (string-match "\\?" mask from)
+      (let ((at (match-beginning 0)))
+        (unless params
+          (signal 'app-server-sql-error (list nil (format "More ? than parameters in: %s" sql))))
+        (push (substring sql start at) parts)
+        (push (app-server--mysql-literal (pop params)) parts)
+        (setq start (1+ at) from (1+ at))))
+    (when params
+      (signal 'app-server-sql-error (list nil (format "More parameters than ? in: %s" sql))))
+    (push (substring sql start) parts)
+    (apply #'concat (nreverse parts))))
+
+(defun app-server--mysql-json-select (sql)
+  "SQL, a SELECT, made to give each row as one JSON array.
+Its columns' aliases go (rows are lists); a * is refused."
+  (let* ((nested (app-server--sql-mask sql t))
+         (case-fold-search t)
+         (word "\\(?:\\`\\|[^A-Za-z0-9_$]\\)"))
+    (unless (string-match "\\`[ \t\n]*SELECT[ \t\n]+\\(\\(?:DISTINCT\\|ALL\\)[ \t\n]+\\)?" nested)
+      (signal 'app-server-sql-error (list nil (format "Not a SELECT: %s" sql))))
+    (let* ((head (substring sql 0 (match-end 0)))
+           (list-start (match-end 0))
+           (from (and (string-match (concat word "\\(FROM\\)[^A-Za-z0-9_$]") nested list-start)
+                      (match-beginning 1)))
+           (list-end (or from (length sql)))
+           (items nil)
+           (start list-start))
+      (while (< start list-end)
+        (let* ((comma (and (string-match "," nested start) (< (match-beginning 0) list-end)
+                           (match-beginning 0)))
+               (end (or comma list-end))
+               (item (substring sql start end))
+               (masked (substring nested start end)))
+          (when (string-match-p "\\`[ \t\n]*\\(?:[A-Za-z0-9_$`.]*\\.\\)?\\*[ \t\n]*\\'" masked)
+            (signal 'app-server-sql-error (list nil (format "Name the columns, not *: %s" sql))))
+          (when (string-match "[ \t\n]+AS[ \t\n]+[^ \t\n]+[ \t\n]*\\'" masked)
+            (setq item (substring item 0 (match-beginning 0))))
+          (push (string-trim item) items)
+          (setq start (if comma (1+ comma) list-end))))
+      (concat head "JSON_ARRAY(" (mapconcat #'identity (nreverse items) ", ") ") "
+              (substring sql list-end)))))
+
+(defun app-server--mysql-open ()
+  "A new connection: a `mysql' process that reads statements."
+  (unless (file-readable-p (expand-file-name app-server-mysql))
+    (signal 'app-server-sql-error (list nil (format "Cannot read the MySQL option file %s" app-server-mysql))))
+  (let* ((errors (generate-new-buffer " *app-server-mysql-errors*"))
+         (process (make-process
+                   :name "app-server-mysql"
+                   :buffer (generate-new-buffer " *app-server-mysql*")
+                   :stderr errors
+                   :command (list app-server-mysql-program
+                                  (concat "--defaults-extra-file=" (expand-file-name app-server-mysql))
+                                  "--batch" "--raw" "--skip-column-names" "--unbuffered")
+                   :coding 'utf-8 :connection-type 'pipe :noquery t
+                   :sentinel #'ignore)))
+    (process-put process :errors errors)
+    process))
+
+(defun app-server--mysql-close (process)
+  "End the connection PROCESS: the end of its input, then its buffers."
+  (when (process-live-p process)
+    (ignore-errors (process-send-eof process))
+    (let ((deadline (+ (float-time) 2)))
+      (while (and (process-live-p process) (< (float-time) deadline))
+        (accept-process-output process 0.02)))
+    (when (process-live-p process) (delete-process process)))
+  (let ((errors (process-get process :errors)))
+    (when (buffer-live-p errors)
+      (let ((stderr (get-buffer-process errors))) (when stderr (delete-process stderr)))
+      (kill-buffer errors)))
+  (when (buffer-live-p (process-buffer process)) (kill-buffer (process-buffer process))))
+
+(defun app-server--mysql-failure (process)
+  "The error of PROCESS, which ended: (CODE MESSAGE) from what it said."
+  (let ((errors (process-get process :errors)) (text ""))
+    ;; What it wrote to its error output may come after its end.
+    (let ((stderr (and (buffer-live-p errors) (get-buffer-process errors)))
+          (deadline (+ (float-time) 1)))
+      (while (and stderr (process-live-p stderr) (< (float-time) deadline))
+        (accept-process-output stderr 0.02)))
+    (when (buffer-live-p errors)
+      (setq text (string-trim (with-current-buffer errors (buffer-string)))))
+    (if (string-match "ERROR \\([0-9]+\\)[^:]*: \\(.*\\)" text)
+        (list (string-to-number (match-string 1 text)) (match-string 2 text))
+      (list nil (if (string-empty-p text) "The MySQL client ended" text)))))
+
+(defun app-server--mysql-run (process sql)
+  "Run SQL, one statement or several, on PROCESS; the lines it printed.
+The end mark comes after the last: a statement such as ROW_COUNT() sees
+the one before it."
+  (let* ((mark (format "app-server-sql-%d-%d" (emacs-pid) (cl-incf app-server--mysql-count)))
+         (buffer (process-buffer process))
+         (start (with-current-buffer buffer (point-max)))
+         (sql (replace-regexp-in-string "[; \t\n]+\\'" "" sql))
+         (deadline (+ (float-time) app-server-mysql-timeout))
+         end)
+    (process-send-string process (concat sql ";\nSELECT '" mark "';\n"))
+    (while (and (not end) (process-live-p process) (< (float-time) deadline))
+      (accept-process-output process 0.05)
+      (with-current-buffer buffer
+        (save-excursion
+          (goto-char start)
+          (when (re-search-forward (concat "^" (regexp-quote mark) "$") nil t)
+            (setq end (match-beginning 0))))))
+    ;; A last look: the end mark may have come with the end of the process.
+    (unless end
+      (with-current-buffer buffer
+        (save-excursion
+          (goto-char start)
+          (when (re-search-forward (concat "^" (regexp-quote mark) "$") nil t)
+            (setq end (match-beginning 0))))))
+    (cond (end (split-string (with-current-buffer buffer (buffer-substring-no-properties start end)) "\n" t))
+          ((process-live-p process)
+           (delete-process process)
+           (signal 'app-server-sql-error (list nil (format "MySQL did not answer in %d seconds" app-server-mysql-timeout))))
+          (t (signal 'app-server-sql-error (app-server--mysql-failure process))))))
+
+(defun app-server--mysql-call (statements)
+  "Run STATEMENTS (strings), one after the other in one go, on the
+connection of the moment; the lines they printed."
+  (cond
+   ((and app-server--mysql-process (process-live-p app-server--mysql-process))
+    (condition-case err
+        (app-server--mysql-run app-server--mysql-process
+                               (mapconcat (lambda (sql) (replace-regexp-in-string "[; \t\n]+\\'" "" sql))
+                                          statements ";\n"))
+      (error
+       ;; A connection that failed is gone: so is its transaction.
+       (app-server--mysql-close app-server--mysql-process)
+       (setq app-server--mysql-process nil)
+       (signal (car err) (cdr err)))))
+   (app-server-mysql-keep
+    (setq app-server--mysql-process (app-server--mysql-open))
+    (app-server--mysql-call statements))
+   (t (let ((process (app-server--mysql-open)))
+        (unwind-protect
+            (app-server--mysql-run process
+                                   (mapconcat (lambda (sql) (replace-regexp-in-string "[; \t\n]+\\'" "" sql))
+                                              statements ";\n"))
+          (app-server--mysql-close process))))))
+
+(defun app-server--json-row (line)
+  (let ((json-array-type 'list) (json-object-type 'plist) (json-key-type 'keyword)
+        (json-null nil) (json-false nil))
+    (json-read-from-string line)))
+
+(defun app-server-sql-select (sql &optional params)
+  "The rows of the SELECT statement SQL, a list of lists.
+Each ? in SQL is one of PARAMS, in order: a string, a number, t or nil
+\(NULL).  Values come back as strings, numbers or nil.  On MySQL a column's
+alias is dropped (ORDER BY cannot use it) and * has to be the columns'
+names."
+  (if (eq (app-server-sql-backend) 'mysql)
+      (mapcar #'app-server--json-row
+              (app-server--mysql-call
+               (list (app-server--mysql-bind (app-server--mysql-json-select sql) params))))
+    (sqlite-select (app-server-database) sql params)))
+
+(defun app-server-sql-execute (sql &optional params)
+  "Run the statement SQL with PARAMS (see `app-server-sql-select').
+Returns the number of rows it changed."
+  (if (eq (app-server-sql-backend) 'mysql)
+      (car (app-server--json-row
+            (car (last (app-server--mysql-call
+                        (list (app-server--mysql-bind sql params) "SELECT JSON_ARRAY(ROW_COUNT())"))))))
+    (sqlite-execute (app-server-database) sql params)))
+
+(defun app-server-sql-insert (sql &optional params)
+  "Run the INSERT statement SQL with PARAMS; the id it gave the new row."
+  (if (eq (app-server-sql-backend) 'mysql)
+      (car (app-server--json-row
+            (car (last (app-server--mysql-call
+                        (list (app-server--mysql-bind sql params) "SELECT JSON_ARRAY(LAST_INSERT_ID())"))))))
+    (let ((database (app-server-database)))
+      (sqlite-execute database sql params)
+      (caar (sqlite-select database "SELECT last_insert_rowid()")))))
+
+(defmacro app-server-sql-transaction (&rest body)
+  "Run BODY as one transaction: all of its changes, or none.
+An error in BODY undoes them and goes on; so does the end of the process
+in the middle (MySQL drops the connection, SQLite its journal)."
+  (declare (indent 0) (debug t))
+  `(app-server--sql-transaction (lambda () ,@body)))
+
+(defvar app-server--sql-transaction nil "Non-nil inside `app-server-sql-transaction'.")
+
+(defun app-server--sql-transaction (function)
+  (cond
+   ;; Inside one already: it is part of that one.
+   (app-server--sql-transaction (funcall function))
+   ((eq (app-server-sql-backend) 'mysql)
+    (let* ((own (not (and app-server--mysql-process (process-live-p app-server--mysql-process))))
+           (app-server--mysql-process (if own (app-server--mysql-open) app-server--mysql-process))
+           (app-server--sql-transaction t)
+           (done nil))
+      (unwind-protect
+          (progn
+            (app-server--mysql-call (list "START TRANSACTION"))
+            (prog1 (funcall function)
+              (app-server--mysql-call (list "COMMIT"))
+              (setq done t)))
+        (let ((process app-server--mysql-process))
+          ;; A connection that failed has gone, and its transaction with it.
+          (when (and (not done) process (process-live-p process))
+            (ignore-errors (app-server--mysql-run process "ROLLBACK")))
+          (when (and own process) (app-server--mysql-close process))))))
+   (t
+    (let ((database (app-server-database)) (app-server--sql-transaction t) (done nil))
+      (sqlite-transaction database)
+      (unwind-protect
+          (prog1 (funcall function)
+            (sqlite-commit database)
+            (setq done t))
+        (unless done (sqlite-rollback database)))))))
+
 (defvar app-server-session-days 30 "How long a session lasts.")
 (defvar app-server-session-cookie "session" "The name of the session's cookie.")
 (defvar app-server-attempts-max 5
@@ -817,12 +1143,15 @@ except Exception:
   "The time in which `app-server-attempts-max' failures stop further tries.")
 
 (defvar app-server--memory (make-hash-table :test 'equal)
-  "Sessions and attempts, in an Emacs without SQLite.")
+  "Sessions and attempts, in an Emacs without SQLite or MySQL.")
 (defvar app-server--own-tables nil "Non-nil once the tables of server.db exist.")
 
 (defun app-server--own-database ()
-  "The database of sessions and attempts, or nil in an Emacs without SQLite."
-  (when (and (fboundp 'sqlite-available-p) (sqlite-available-p))
+  "Where sessions and attempts are: `mysql' (`app-server-mysql'), the
+SQLite database server.db, or nil (this Emacs's memory) without either."
+  (cond
+   (app-server-mysql 'mysql)
+   ((and (fboundp 'sqlite-available-p) (sqlite-available-p))
     (let ((database (app-server-database "server")))
       (unless app-server--own-tables
         (sqlite-execute database "CREATE TABLE IF NOT EXISTS sessions (
@@ -830,7 +1159,33 @@ except Exception:
         (sqlite-execute database "CREATE TABLE IF NOT EXISTS attempts (name TEXT NOT NULL, at REAL NOT NULL)")
         (sqlite-execute database "CREATE INDEX IF NOT EXISTS attempts_name ON attempts (name)")
         (setq app-server--own-tables t))
-      database)))
+      database))))
+
+(defun app-server--own-table (database name)
+  "The table NAME (`sessions' or `attempts') of DATABASE."
+  (if (eq database 'mysql) (format "app_server_%s" name) (symbol-name name)))
+
+(defun app-server--own-mysql-tables ()
+  (app-server-sql-execute "CREATE TABLE IF NOT EXISTS app_server_sessions (
+                             token CHAR(64) NOT NULL PRIMARY KEY, visitor TEXT NOT NULL,
+                             expires DOUBLE NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
+  (app-server-sql-execute "CREATE TABLE IF NOT EXISTS app_server_attempts (
+                             name CHAR(64) NOT NULL, at DOUBLE NOT NULL,
+                             KEY app_server_attempts_name (name)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"))
+
+(defun app-server--own-sql (database kind sql &optional params)
+  "Run SQL with PARAMS on DATABASE (`app-server--own-database'): KIND is
+`select' (the rows) or `execute'.  The MySQL tables are made at need."
+  (cl-flet ((run () (if (eq kind 'select) (app-server-sql-select sql params) (app-server-sql-execute sql params))))
+    (if (eq database 'mysql)
+        (condition-case err
+            (run)
+          (app-server-sql-error
+           ;; 1146: no such table.  The first use on a new database.
+           (if (eql (nth 1 err) 1146)
+               (progn (app-server--own-mysql-tables) (run))
+             (signal (car err) (cdr err)))))
+      (if (eq kind 'select) (sqlite-select database sql params) (sqlite-execute database sql params)))))
 
 (defun app-server--print (data)
   (let ((print-length nil) (print-level nil)) (prin1-to-string data)))
@@ -848,11 +1203,13 @@ Returns VISITOR."
          (expires (+ (float-time) seconds))
          (database (app-server--own-database)))
     (if database
-        (progn
+        (let ((table (app-server--own-table database 'sessions)))
           ;; Also the moment to forget what has run out.
-          (sqlite-execute database "DELETE FROM sessions WHERE expires < ?" (list (float-time)))
-          (sqlite-execute database "INSERT INTO sessions (token, visitor, expires) VALUES (?, ?, ?)"
-                          (list key (app-server--print visitor) expires)))
+          (app-server--own-sql database 'execute (format "DELETE FROM %s WHERE expires < ?" table)
+                               (list (float-time)))
+          (app-server--own-sql database 'execute
+                               (format "INSERT INTO %s (token, visitor, expires) VALUES (?, ?, ?)" table)
+                               (list key (app-server--print visitor) expires)))
       (puthash (concat "session " key) (cons (app-server--print visitor) expires) app-server--memory))
     (app-server-set-cookie app-server-session-cookie token :max-age (round seconds))
     visitor))
@@ -867,8 +1224,11 @@ The value is what `app-server-session-start' was given."
   (let* ((key (app-server--session-key))
          (database (and key (app-server--own-database)))
          (found (cond ((not key) nil)
-                      (database (car (sqlite-select database "SELECT visitor, expires FROM sessions WHERE token = ?"
-                                                    (list key))))
+                      (database (car (app-server--own-sql
+                                      database 'select
+                                      (format "SELECT visitor, expires FROM %s WHERE token = ?"
+                                              (app-server--own-table database 'sessions))
+                                      (list key))))
                       (t (let ((kept (gethash (concat "session " key) app-server--memory)))
                            (and kept (list (car kept) (cdr kept))))))))
     (and found (> (nth 1 found) (float-time))
@@ -879,7 +1239,10 @@ The value is what `app-server-session-start' was given."
   (let* ((key (app-server--session-key))
          (database (and key (app-server--own-database))))
     (cond ((not key))
-          (database (sqlite-execute database "DELETE FROM sessions WHERE token = ?" (list key)))
+          (database (app-server--own-sql database 'execute
+                                         (format "DELETE FROM %s WHERE token = ?"
+                                                 (app-server--own-table database 'sessions))
+                                         (list key)))
           (t (remhash (concat "session " key) app-server--memory))))
   (app-server-delete-cookie app-server-session-cookie)
   nil)
@@ -890,7 +1253,9 @@ For when a password was changed: whoever knew the old one is out."
   (let ((database (app-server--own-database))
         (printed (app-server--print visitor)))
     (if database
-        (sqlite-execute database "DELETE FROM sessions WHERE visitor = ?" (list printed))
+        (app-server--own-sql database 'execute
+                             (format "DELETE FROM %s WHERE visitor = ?" (app-server--own-table database 'sessions))
+                             (list printed))
       (maphash (lambda (key kept)
                  (when (and (string-prefix-p "session " key) (equal (car kept) printed))
                    (remhash key app-server--memory)))
@@ -913,8 +1278,11 @@ Without a proxy there is none to tell apart: everyone is this machine."
   "The times of the failures for NAME (hashed) after SINCE, oldest first."
   (let ((database (app-server--own-database)))
     (if database
-        (mapcar #'car (sqlite-select database "SELECT at FROM attempts WHERE name = ? AND at > ? ORDER BY at"
-                                     (list name since)))
+        (mapcar #'car (app-server--own-sql
+                       database 'select
+                       (format "SELECT at FROM %s WHERE name = ? AND at > ? ORDER BY at"
+                               (app-server--own-table database 'attempts))
+                       (list name since)))
       (seq-filter (lambda (at) (> at since)) (gethash (concat "attempts " name) app-server--memory)))))
 
 (defun app-server-attempts-check (&rest names)
@@ -936,10 +1304,15 @@ many is `app-server-attempts-max' within `app-server-attempts-seconds'."
   (let ((database (app-server--own-database))
         (now (float-time)))
     (when database
-      (sqlite-execute database "DELETE FROM attempts WHERE at < ?" (list (- now app-server-attempts-seconds))))
+      (app-server--own-sql database 'execute
+                           (format "DELETE FROM %s WHERE at < ?" (app-server--own-table database 'attempts))
+                           (list (- now app-server-attempts-seconds))))
     (dolist (name (app-server--attempt-names names))
       (if database
-          (sqlite-execute database "INSERT INTO attempts (name, at) VALUES (?, ?)" (list name now))
+          (app-server--own-sql database 'execute
+                               (format "INSERT INTO %s (name, at) VALUES (?, ?)"
+                                       (app-server--own-table database 'attempts))
+                               (list name now))
         (puthash (concat "attempts " name)
                  (append (app-server--attempts name (- now app-server-attempts-seconds)) (list now))
                  app-server--memory))))
@@ -950,7 +1323,9 @@ many is `app-server-attempts-max' within `app-server-attempts-seconds'."
   (let ((database (app-server--own-database)))
     (dolist (name (app-server--attempt-names names))
       (if database
-          (sqlite-execute database "DELETE FROM attempts WHERE name = ?" (list name))
+          (app-server--own-sql database 'execute
+                               (format "DELETE FROM %s WHERE name = ?" (app-server--own-table database 'attempts))
+                               (list name))
         (remhash (concat "attempts " name) app-server--memory))))
   nil)
 

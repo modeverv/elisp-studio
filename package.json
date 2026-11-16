@@ -7,13 +7,14 @@
   "scripts": {
     "serve": "node tools/serve.mjs",
     "studio": "node tools/studio.mjs",
-    "test": "npm run test:unit && npm run test:e2e && npm run test:e2e:plain && npm run test:e2e:sqlite && npm run test:e2e:upload && npm run test:e2e:local",
+    "test": "npm run test:unit && npm run test:e2e && npm run test:e2e:plain && npm run test:e2e:sqlite && npm run test:e2e:upload && npm run test:e2e:todos && npm run test:e2e:local",
     "test:unit": "node --test test/*.test.mjs",
     "test:e2e": "node test/e2e.mjs",
     "test:e2e:plain": "node test/e2e.mjs --plain",
     "test:e2e:sqlite": "node test/e2e-sqlite.mjs",
     "test:e2e:upload": "node test/e2e-upload.mjs",
     "test:e2e:local": "node test/e2e-local.mjs",
+    "test:e2e:todos": "node test/e2e-todos.mjs",
     "test:docker": "node test/docker.mjs"
   },
   "engines": {

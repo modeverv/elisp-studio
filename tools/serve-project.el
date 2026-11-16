@@ -153,10 +153,12 @@ the reverse proxy in front spreads the requests over them.")
 
 ;; app-server.el: next to this file (a downloaded project), or in lisp/ of
 ;; the elisp-studio repository.
+;; Without the suffix: a compiled app-server.elc is taken when it is there
+;; (and newer, with `load-prefer-newer').
 (let ((here (file-name-directory (or load-file-name buffer-file-name))))
   (load (if (file-readable-p (expand-file-name "app-server.el" here))
-            (expand-file-name "app-server.el" here)
-          (expand-file-name "../lisp/app-server.el" here))
+            (expand-file-name "app-server" here)
+          (expand-file-name "../lisp/app-server" here))
         nil t))
 
 (defconst serve-project--types
@@ -223,7 +225,24 @@ reaches Emacs from one of those ends an Emacs in batch mode (exit status
 (defconst serve-project--piece (* 1024 1024) "A file larger than this is not read into memory whole.")
 (defconst serve-project--send-piece (* 256 1024) "Files are sent in pieces of this size.")
 
+(defvar serve-project-respond-function nil
+  "nil, or what sends the answers instead of a connection: a function of
+STATUS (\"200 OK\"), TYPE, BODY (bytes), HEADERS (those of every answer
+included) and FILE (see `serve-project--respond').  tools/serve-cgi.el,
+which answers one request as a CGI program, writes them out.")
+
 (defun serve-project--respond (process status type body &optional headers close file)
+  "Send a response on PROCESS: STATUS (\"200 OK\"), TYPE, BODY (bytes).
+HEADERS is a list of (NAME . VALUE); `serve-project-default-headers' go
+with them.  With FILE, the body is that file's content; (FILE START END)
+is the part of it from byte START up to END.  CLOSE: see
+`serve-project--respond-on'."
+  (if serve-project-respond-function
+      (funcall serve-project-respond-function status type body
+               (serve-project--merge-headers serve-project-default-headers headers) file)
+    (serve-project--respond-on process status type body headers close file)))
+
+(defun serve-project--respond-on (process status type body &optional headers close file)
   "Send a response on PROCESS: STATUS (\"200 OK\"), TYPE, BODY (bytes).
 HEADERS is a list of (NAME . VALUE).  The connection stays open for the
 next request if the visitor asked for that, unless CLOSE.  With FILE, the

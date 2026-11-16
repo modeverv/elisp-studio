@@ -14,15 +14,35 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # The MySQL that test/serve-cgi.test.mjs fills (app-server-sql on MySQL).
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: test
+          MYSQL_USER: test
+          MYSQL_PASSWORD: test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval 5s --health-timeout 5s --health-retries 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-      - name: Install Emacs (the project server test runs one)
+      - name: Install Emacs (the project server test runs one) and the MySQL client
         run: |
           sudo apt-get update
-          sudo apt-get install -y emacs-nox
+          sudo apt-get install -y emacs-nox mysql-client
+      - name: The MySQL option file of the tests
+        run: |
+          printf '[client]\nhost=127.0.0.1\nport=3306\nuser=test\npassword=test\ndefault-character-set=utf8mb4\n\n[mysql]\ndatabase=test\n' > "$RUNNER_TEMP/test.cnf"
+          chmod 600 "$RUNNER_TEMP/test.cnf"
+          mysql --defaults-extra-file="$RUNNER_TEMP/test.cnf" -e 'SELECT VERSION()'
+          echo "APP_SERVER_TEST_MYSQL=$RUNNER_TEMP/test.cnf" >> "$GITHUB_ENV"
       - run: npm run test:unit
       - name: The scripts parse
         run: node --check js/studio.js && node --check js/tar.js && node --check tools/serve.mjs

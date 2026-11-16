@@ -9,6 +9,7 @@ An application written in Emacs Lisp, made with elisp-studio
   server/                         what run.sh loads into Emacs
   server/deploy/                  for publishing: Caddy, nginx, systemd
   Dockerfile, docker-compose.yml  for publishing with Docker (Caddy in front)
+  server/cgi/                     for a shared host that runs CGI (deploy.sh)
   .gitignore                      what git should not keep: .data/ (the users'
                                   sessions and password hashes), vendor/wasmacs/, ...
   test/run.sh                     check it: every .el file compiles without a
@@ -77,6 +78,21 @@ Caddy in front of run.sh in the same container:
                                       certificate
 
 .data/ and Caddy's certificates are volumes: they outlive the container.
+
+On a shared host that runs CGI programs and ends any process that stays
+(Sakura's rental server, for one), each request to /api/ starts an Emacs
+(27.2 or later) that answers and ends (server/serve-cgi.el):
+
+  server/cgi/deploy.sh SSH-HOST WEB-DIR APP-DIR https://example.com
+
+WEB-DIR (under the web root) gets the page, app.cgi and .htaccess; APP-DIR
+(outside it) the project and its data.  With the data in MySQL, write
+APP-DIR/my.cnf on the host yourself, then deploy again:
+
+  ssh -t SSH-HOST sh APP-DIR/server/cgi/make-mycnf.sh MYSQL-HOST
+
+server.el uses app-server-sql-select and the rest: SQLite here, MySQL
+there.  Nothing stays in Lisp variables from one request to the next.
 
 Pages of other sites may not use /api/, unless they are named:
 
