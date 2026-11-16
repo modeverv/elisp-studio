@@ -168,6 +168,7 @@ the old one in one step, for the requests that start meanwhile."
                                      (expand-file-name (or (getenv "APP_DATA") ".data/") directory))
           ;; Many processes, one at each request: nothing is known to the next.
           app-server-shared t
+          app-server-single-request t
           app-server-explain-errors nil
           app-server-mysql-keep t
           serve-project-log nil

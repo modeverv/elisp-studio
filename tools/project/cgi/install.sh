@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: 0BSD  (yours to change; no conditions)
 # Run on the host by deploy.sh: put the project that came in INCOMING (a
 # directory of the home directory) in place.
-#   install.sh INCOMING WEB-DIR APP-DIR PUBLIC-ORIGIN [MYSQL-CNF]
+#   install.sh INCOMING WEB-DIR APP-DIR PUBLIC-ORIGIN
 set -eu
 cd "$HOME"
 incoming="$HOME/$1"; web="$HOME/$2"; app="$HOME/$3"; origin="$4"
@@ -25,10 +25,6 @@ chmod 700 "$app" "$app/data"
 [ -f "$web/index.html" ] || { echo "install.sh: the page's files did not reach $web" >&2; exit 1; }
 cp "$app/server/cgi/htaccess" "$web/.htaccess"
 mysql=""; [ -f "$app/my.cnf" ] && mysql="$app/my.cnf"
-if [ -n "${5:-}" ]; then
-  mysql="$HOME/$5"
-  [ -r "$mysql" ] || { echo "install.sh: cannot read $mysql" >&2; exit 1; }
-fi
 cat > "$web/app.cgi" <<CGI
 #!/bin/sh
 # Written by server/cgi/install.sh.  Each request to /api/ starts an Emacs,
@@ -60,4 +56,19 @@ chmod 700 "$app/job.sh"
 # Compiled, the server's Lisp loads in a fraction of the time: each request pays it.
 ( cd "$app/server" && rm -f ./*.elc && "$emacs" --batch -Q -L . --eval '(setq byte-compile-warnings nil)' \
     -f batch-byte-compile app-server.el serve-project.el serve-cgi.el >/dev/null 2>&1 )
+# elisp-next's shared/ and api/ too, when the project has it: compiled the
+# same way, with what they use loaded; a file that does not compile is
+# loaded as it is.  Old .elc files go first (tar keeps the dates of the
+# sources, which may be older than they).
+if [ -f "$app/vendor/elisp-next/lisp/nextel-server.el" ]; then
+  ( cd "$app" && find shared api -name '*.elc' -exec rm -f {} + 2>/dev/null || true
+    "$emacs" --batch -Q --eval '(setq byte-compile-warnings nil load-prefer-newer t)' \
+      -l "$app/server/app-server.elc" -l "$app/vendor/elisp-next/lisp/nextel-server.el" \
+      --eval '(let ((app-server-project-directory default-directory) (nextel-server-lazy t))
+                (nextel-server-load)
+                (dolist (directory (quote ("shared" "api")))
+                  (when (file-directory-p directory)
+                    (dolist (file (directory-files-recursively directory "\\`[^.].*\\.el\\'"'"'"))
+                      (unless (string-match-p "/\\." file) (ignore-errors (byte-compile-file file)))))))' >/dev/null 2>&1 || true )
+fi
 echo "install.sh: $origin/ is $web; the server reads $app$( [ -n "$mysql" ] && echo ", data in MySQL" || true ); jobs: $app/job.sh"

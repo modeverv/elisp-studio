@@ -138,6 +138,11 @@ database; otherwise in a file of the data directory."
              (read (current-buffer))))
           (t default))))
 
+(defvar app-server-single-request nil
+  "Non-nil when this Emacs answers one request and ends (a CGI:
+tools/serve-cgi.el).  A library may then load at the start only what the
+request needs: elisp-next loads the one file of api/ that answers.")
+
 (defvar app-server-shared nil
   "Non-nil when several server processes share the data directory.
 \(WORKERS=4 ./run.sh.)  What a handler keeps in a Lisp variable is then

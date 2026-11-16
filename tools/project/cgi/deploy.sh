@@ -13,11 +13,6 @@
 # The host's Emacs (27.2 or later) compiles server/ there.  Run it from the
 # project's directory; run it again after a change.
 #
-#   MYSQL_CNF=other-app/my.cnf server/cgi/deploy.sh ...
-#
-# uses the MySQL settings of another application (relative to the home
-# directory) instead of APP-DIR/my.cnf, without a copy of the password.
-#
 # APP-DIR/job.sh runs the jobs of server.el (app-server-defjob): give it
 # to cron, every 10 minutes say.
 set -eu
@@ -26,12 +21,10 @@ host="${1:?$usage}"; web="${2:?$usage}"; app="${3:?$usage}"; origin="${4:?$usage
 [ -f index.html ] && [ -f server/serve-cgi.el ] || { echo "deploy.sh: run it in the project's directory" >&2; exit 2; }
 case "$web$app" in *[!A-Za-z0-9_./-]*) echo "deploy.sh: WEB-DIR and APP-DIR are plain relative paths" >&2; exit 2;; esac
 case "$origin" in https://*|http://*) ;; *) echo "deploy.sh: PUBLIC-ORIGIN is https://NAME" >&2; exit 2;; esac
-cnf="${MYSQL_CNF:-}"
-case "$cnf" in *[!A-Za-z0-9_./-]*) echo "deploy.sh: MYSQL_CNF is a plain relative path" >&2; exit 2;; esac
 incoming=".deploy-$$"
 # The project, without what is not for the host, unpacked there and put in
 # place by install.sh.  The command is one that csh (the login shell of
 # some hosts) runs as sh would.
 COPYFILE_DISABLE=1 tar -cf - --exclude ./.git --exclude ./.data --exclude ./.cache --exclude ./my.cnf \
     --exclude '*.elc' --exclude ./node_modules . \
-  | ssh "$host" "mkdir -p $incoming && tar -xf - -C $incoming && sh $incoming/server/cgi/install.sh $incoming $web $app $origin $cnf"
+  | ssh "$host" "mkdir -p $incoming && tar -xf - -C $incoming && sh $incoming/server/cgi/install.sh $incoming $web $app $origin"

@@ -426,7 +426,7 @@ ssh -t myhost sh todos-app/server/cgi/make-mycnf.sh mysql80.ACCOUNT.sakura.ne.jp
 
 It asks for the user, the database and the password, which it does not show, and tests the connection. `app.cgi` gives the server the file's path (`APP_MYSQL`), so no copy of the password is in the web root, the project or the repository. Sessions, sign-in attempts, jobs and `app-server-write`'s values are in that database too.
 
-A second application can use the same database without a second copy of the password: `MYSQL_CNF=todos-app/my.cnf server/cgi/deploy.sh ...` (relative to the home directory).
+Give each application a database of its own: the `app_server_` tables are the application's, sessions among them.
 
 **Tried on Sakura's rental server (2026-11-16)**
 
