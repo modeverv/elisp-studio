@@ -493,7 +493,7 @@ Caddy の後ろに複数のワーカーを置いた場合（`ab -k -c 40`）、�
   server/serve-cgi.el, server/cgi/    CGI を動かす共用ホスト向け：deploy.sh、make-mycnf.sh（「共用ホストで動かす」）
   ```
 
-  `./run.sh` を実行すると、Emacs がページを配信し、ページからのリクエストに答えます。ブラウザの中でページの `app.el` を動かす Emacs は、通常はページが wasmacs のサイトからダウンロードします。`./fetch-emacs.sh` を実行したあとは、同じ Emacs が `vendor/` から配信するようになり、インターネットは不要になります。
+  `./run.sh` を実行すると、Emacs がページを配信し、ページからのリクエストに答えます。ブラウザの中でページの `app.el` を動かす Emacs は、通常はページが wasmacs のサイトからダウンロードします。`./fetch-emacs.sh` を実行したあとは、同じ Emacs が `vendor/` から配信するようになり、インターネットは不要になります。プロジェクトが `vendor/elisp-react/`（`js/elisp-react.js`、`lisp/react.el`）に elisp-react だけを、自分で選んだ版で置くこともできます。その場合、サーバーはその elisp-react を送り、Emacs は wasmacs のサイトから取得させたままにします。
 
   `vendor/` に置かれる量（約170MB）は、訪問者がダウンロードする量ではありません。訪問者が受け取るのは、Emacs 本体の約5MBと、Emacs 付属の Lisp ファイルのうちページが読んだものだけです（elisp-react のサンプルで最大7ファイル、0.5MB）。ブラウザはそれを次回のために保持します。プロキシを前に置いても置かなくても、プロジェクトのサーバーの次の2つの働きでそうなります。
 

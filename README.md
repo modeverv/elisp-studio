@@ -493,7 +493,7 @@ Deferring itself costs nothing to speak of: a handler that defers and answers at
   server/serve-cgi.el, server/cgi/    for a shared host that runs CGI: deploy.sh, make-mycnf.sh ("On a shared host")
   ```
 
-  After `./run.sh`, Emacs serves the page and answers its requests. The Emacs that runs the page's `app.el` in the browser is downloaded by the page from the wasmacs site; after `./fetch-emacs.sh` it is served from `vendor/` by the same Emacs instead, and nothing needs the internet any more.
+  After `./run.sh`, Emacs serves the page and answers its requests. The Emacs that runs the page's `app.el` in the browser is downloaded by the page from the wasmacs site; after `./fetch-emacs.sh` it is served from `vendor/` by the same Emacs instead, and nothing needs the internet any more. A project may also keep only elisp-react in `vendor/elisp-react/` (`js/elisp-react.js`, `lisp/react.el`), at a version of its choosing: the server then sends that one, with Emacs still from the wasmacs site.
 
   What lies in `vendor/` (about 170 MB) is not what a visitor downloads. A visitor gets Emacs itself, about 5 MB, and of Emacs's Lisp files the ones the page reads, one by one (elisp-react's examples: up to seven files, 0.5 MB); the browser keeps all of it for the next visit. Two things in the project's server make that so, with or without a proxy in front:
 

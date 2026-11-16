@@ -1374,10 +1374,18 @@ test("a downloaded project runs itself: run.sh, and with vendor/ its own copy of
     assert.match(await readFile(join(directory, "server/app-server.el"), "utf8"), /SPDX-License-Identifier: MIT/);
     await server.stop();
 
-    // With a copy in vendor/ (what fetch-emacs.sh makes) the page is told to use it.
+    // A project that keeps elisp-react in vendor/ by itself (a version of
+    // its choosing) uses that, and still the public Emacs.
     await mkdir(join(directory, "vendor/elisp-react/js"), { recursive: true });
-    await mkdir(join(directory, "vendor/wasmacs/app/src"), { recursive: true });
     await writeFile(join(directory, "vendor/elisp-react/js/elisp-react.js"), "// a copy\n");
+    server = await start();
+    const ownReact = await (await fetch(`${server.origin}/`)).text();
+    assert.match(ownReact, /<script type="module" src="\/vendor\/elisp-react\/js\/elisp-react\.js">/);
+    assert.equal(ownReact.includes("elisp-react:wasmacs"), false);
+    await server.stop();
+
+    // With a copy of both (what fetch-emacs.sh makes) the page is told to use them.
+    await mkdir(join(directory, "vendor/wasmacs/app/src"), { recursive: true });
     await writeFile(join(directory, "vendor/wasmacs/app/src/emacs-eval-client.js"), "// a copy\n");
     server = await start();
     const vendored = await (await fetch(`${server.origin}/`)).text();
