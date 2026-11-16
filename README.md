@@ -431,7 +431,8 @@ A second application can use the same database without a second copy of the pass
 **Tried on Sakura's rental server (2026-11-16)**
 
 - **The host:** FreeBSD 13.0, its own Emacs 27.2 (no SQLite or GnuTLS), MySQL 8.0, Python 3.8 for password hashes.
-- **The example:** `examples/todos`, used from Chrome — accounts, todos, a wrong password, signing out.
+- **The example:** `examples/todos`, used from Chrome — accounts, todos, a wrong password, signing out; a file attached to a todo and downloaded with the same bytes, refused without the session (401) and above 10 MB, gone with its todo.
+- **Jobs:** `job.sh` runs the jobs that are due, and the next run finds them not due; `curl` fetches `https:` for the host's Emacs.
 - **Speed:** an answer takes 60–90 ms on the host, Emacs's start included. A sign-up takes 0.5 s, mostly the password hash.
 
 
