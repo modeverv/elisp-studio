@@ -29,7 +29,7 @@ Emacs Lisp の Web アプリケーションをブラウザの中で書き、リ�
 3. Emacs で `app.el` の文字列（たとえば `"Count: %d"`）を書き換え、`C-x C-s` で保存します。
 4. アプリケーションの表示が新しい文字列に変わります。カウンターの数はそのままです。
 
-プロジェクトは Emacs のファイルシステムの `/home/user/elisp-studio/app` にあります。ブラウザが保持するので、次に開いたときも残っています。新しいプロジェクトは `template/` から作られます。アドレスに `?example=stopwatch`、`?example=sqlite`、`?example=upload` のいずれかを付けると、`examples/` の該当するディレクトリから作られます。`index.html` のあるディレクトリはプロジェクトとして扱われ、そのまま使われます。Emacs は `index.html` が読み込む最初の Emacs Lisp ファイル（テンプレートでは `app.el`）を開き、すでにあるファイルを上書きすることはありません（最初からやり直すには、Emacs の中でこのディレクトリを削除します）。これは wasmacs のページが使っているのと同じ `/home/user` なので、wasmacs を直接開いたときにもプロジェクトが見えます。ファイルは次のとおりです。
+プロジェクトは Emacs のファイルシステムの `/home/user/elisp-studio/app` にあります。ブラウザが保持するので、次に開いたときも残っています。新しいプロジェクトは `template/` から作られます。アドレスに `?example=stopwatch`、`?example=sqlite`、`?example=upload`、`?example=todos` のいずれかを付けると、`examples/` の該当するディレクトリから作られます。`index.html` のあるディレクトリはプロジェクトとして扱われ、そのまま使われます。Emacs は `index.html` が読み込む最初の Emacs Lisp ファイル（テンプレートでは `app.el`）を開き、すでにあるファイルを上書きすることはありません（最初からやり直すには、Emacs の中でこのディレクトリを削除します）。これは wasmacs のページが使っているのと同じ `/home/user` なので、wasmacs を直接開いたときにもプロジェクトが見えます。ファイルは次のとおりです。
 
 ```text
 index.html   ページ。<div id="app">、スタイルシート、<script type="text/emacs-lisp" src="app.el">
@@ -109,6 +109,16 @@ Emacs でプロジェクトのファイルを開いているときに使える�
 ```
 
 [`examples/sqlite`](examples/sqlite) は、この方法でデータを持つ読書リストです（[試す](https://modeverv.github.io/elisp-studio/?example=sqlite)）。studio の中では、データベースはサーバー役の Emacs のメモリ上のファイルで、studio がブラウザ（IndexedDB）に保存して次回に引き継ぎます。ネイティブの Emacs で動かすと `.data/app.db` というファイルになり、`sqlite3` コマンドでも開けます。
+
+- `app-server-sql-select`、`app-server-sql-execute`、`app-server-sql-insert`、`app-server-sql-transaction`：同じ SQL を SQLite（`app-server-database`）でも MySQL でも使えます。MySQL を使うのは、`app-server-mysql` に MySQL のオプションファイルを指定したときです（下の「共用ホストで動かす」）。
+  - **パラメータ：** `?` はそれぞれパラメータの1つで、SQL の文字列にはなりません。MySQL では文字列を16進（`CONVERT(X'...' USING utf8mb4)`）で渡します。
+  - **行**は、文字列・数値・nil のリストで返ります。
+  - **MySQL での決まり：** SELECT では列を名前で書きます（`*` は使えません）。別名は `AS` で書き、結果からは外れます。
+  - **エラー**は `app-server-sql-error` で、MySQL のコードが付きます（1062 は重複）。
+  - **トランザクション**は全部か無しかです。途中でプロセスが終わっても同じです。
+  - **セッションとサインインの試行**も同じ切り替えに従います。MySQL では、そのテーブル `app_server_sessions` と `app_server_attempts` に置きます。
+
+  [`examples/todos`](examples/todos) はこれを使っています。名前とパスワードのアカウントがあり、アカウントごとに TODO を持ちます（[試す](https://modeverv.github.io/elisp-studio/?example=todos)）。1つの `server.el` が、studio（タブの中の SQLite）、`run.sh`、MySQL のある共用ホストのどれでも動きます。二通り書くのは `CREATE TABLE` だけです。
 
 SQLite の同梱について：SQLite は[パブリックドメイン](https://www.sqlite.org/copyright.html)なので、配布に条件はありません。ブラウザで動く Emacs には、wasmacs がリンクしています（wasmacs の README の「ライセンス」を参照）。ネイティブの Emacs は、SQLite つきでビルドされていれば使えます。通常のパッケージはそうなっています（`(sqlite-available-p)` で確認できます）。このリポジトリにも、ダウンロードしたプロジェクトにも、SQLite 自体は含まれません。
 
@@ -346,6 +356,53 @@ DOMAIN=example.com HTTP_PORT=80 HTTPS_PORT=443 docker compose up -d --build   # 
 
 `server.el` を持つもっと大きなアプリケーションの Parens も、同じ方法で手で動かして確かめました。
 
+### 共用ホストで動かす（CGI、MySQL）
+
+CGI でしかプログラムを動かせず、常駐するプロセスを終わらせるホストがあります（さくらのレンタルサーバなど）。`tools/serve-cgi.el`（ダウンロードでは `server/serve-cgi.el`）は、`/api/` へのリクエストを1つ、Emacs を1つ起動して答え、終わります。ほかのファイルはホストの Web サーバーが送ります。
+
+**リクエストの扱い**
+
+- serve-project と同じ処理を通ります。`run.sh` のときと同じ検査（他サイトのページは 403、別のホストは 421、CORS）を受け、同じヘッダーが付きます。
+- ホストの Emacs（27.2 以降）で動きます。
+
+**アプリケーションが守ること**
+
+- リクエストの間で Lisp の変数に何も残さないこと。次のリクエストは別のプロセスです。データは `app-server-write` か、データベースに置きます。
+- 複数の文で1つの変更をするときは、`app-server-sql-transaction` に入れること。プロセスは途中で終わることがあります。
+
+デプロイは、プロジェクトのディレクトリから SSH でコマンド1つです。
+
+```sh
+server/cgi/deploy.sh myhost www/todos todos-app https://example.com
+```
+
+**このコマンドがすること**
+
+- `www/todos`（公開ディレクトリの下）に、ページのファイル、`app.cgi`、`.htaccess` を置きます。`.htaccess` は `/api/...` を `app.cgi` に送ります。
+- `todos-app`（公開ディレクトリの外、権限 700）に、プロジェクトと、ホストの Emacs でコンパイルした `server/`、データのディレクトリを置きます。
+
+**データを MySQL に置く場合**
+
+パスワードを置くのは1か所だけです。`todos-app/my.cnf`（権限 600）に、ホストの上でご自身で書き、それからもう一度デプロイします。
+
+```sh
+ssh -t myhost sh todos-app/server/cgi/make-mycnf.sh mysql80.ACCOUNT.sakura.ne.jp
+```
+
+ユーザー、データベース、パスワード（表示しません）を尋ね、接続を確かめます。`app.cgi` はこのファイルの場所（`APP_MYSQL`）だけをサーバーに渡すので、公開ディレクトリにもプロジェクトにもリポジトリにも、パスワードの写しはありません。セッションとサインインの試行もこのデータベースに置きます。
+
+**さくらのレンタルサーバで試したこと（2026-11-16）**
+
+- **ホスト：** FreeBSD 13.0、ホスト自身の Emacs 27.2（SQLite も GnuTLS もなし）、MySQL 8.0、パスワードのハッシュには Python 3.8 を使いました。
+- **例：** `examples/todos` を Chrome から使いました。アカウント、TODO、間違ったパスワード、サインアウトです。
+- **速さ：** 1回の答えはホスト上で 60〜90 ms でした（Emacs の起動を含む）。アカウントの作成は 0.5 秒で、ほとんどがパスワードのハッシュです。
+
+**まだないもの**
+
+- 本文の上限を超えるアップロード
+- cron が要る定期処理（#39）
+- GnuTLS のない Emacs での `https:` への `app-server-fetch`（#41）
+
 ### このサーバーの速さ
 
 1つの Emacs、1つのスレッドで、Node.js と同じ動き方をします。接続は OS の中で待ち、Emacs はリクエストを1つ受け取り、ハンドラを最後まで実行し、応答して、次を受け取ります。`server.el` とサーバー自身は、起動時にバイトコンパイルされます。Apple M4 Max、Emacs 31.1 で、ApacheBench を使って同時10接続で計測した結果です（`ab -n 10000 -c 10`。`-k` を付けると、プロキシと同じように接続を維持します）。
@@ -400,6 +457,7 @@ Caddy の後ろに複数のワーカーを置いた場合（`ab -k -c 40`）、�
   test/run.sh         検査。すべての .el ファイルが警告なしでコンパイルできること、次に test/*-test.el（ERT）
   .github/workflows/test.yml    同じ検査を GitHub への push のたびに行う
   Dockerfile, docker-compose.yml, .dockerignore    docker compose up。同じものをコンテナで、Caddy を手前に置いて動かす（「Docker で動かす」）
+  server/serve-cgi.el, server/cgi/    CGI を動かす共用ホスト向け：deploy.sh、make-mycnf.sh（「共用ホストで動かす」）
   ```
 
   `./run.sh` を実行すると、Emacs がページを配信し、ページからのリクエストに答えます。ブラウザの中でページの `app.el` を動かす Emacs は、通常はページが wasmacs のサイトからダウンロードします。`./fetch-emacs.sh` を実行したあとは、同じ Emacs が `vendor/` から配信するようになり、インターネットは不要になります。

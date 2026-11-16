@@ -861,6 +861,11 @@ const RUNTIME_FILES = [
   ["docker-compose.yml", "tools/project/docker-compose.yml", false],
   [".dockerignore", "tools/project/dockerignore", false],
   ["server/deploy/docker-start.sh", "tools/project/deploy/docker-start.sh", true],
+  ["server/serve-cgi.el", "tools/serve-cgi.el", false],
+  ["server/cgi/deploy.sh", "tools/project/cgi/deploy.sh", true],
+  ["server/cgi/install.sh", "tools/project/cgi/install.sh", true],
+  ["server/cgi/make-mycnf.sh", "tools/project/cgi/make-mycnf.sh", true],
+  ["server/cgi/htaccess", "tools/project/cgi/htaccess", false],
 ];
 
 async function projectZip() {

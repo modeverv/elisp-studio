@@ -29,7 +29,7 @@ Both halves are Emacs. On the left is the real GNU Emacs 30.2, running in the pa
 3. In Emacs, change a text in `app.el`, for example `"Count: %d"`, and save with `C-x C-s`.
 4. The application shows the new text, and the counter still has its count.
 
-The project is `/home/user/elisp-studio/app` in Emacs's filesystem, which the browser keeps: it is still there at the next visit. A new project starts from `template/`, or, with `?example=stopwatch`, `?example=sqlite` or `?example=upload` in the address, from that directory of `examples/`. A directory with an `index.html` is a project and is left as it is: Emacs opens the first Emacs Lisp file that `index.html` loads (`app.el` in the template), and no file that is there is written over (remove the directory in Emacs to start over). It is the same `/home/user` that the wasmacs page itself uses, so the project is also there when you open wasmacs directly. Its files:
+The project is `/home/user/elisp-studio/app` in Emacs's filesystem, which the browser keeps: it is still there at the next visit. A new project starts from `template/`, or, with `?example=stopwatch`, `?example=sqlite`, `?example=upload` or `?example=todos` in the address, from that directory of `examples/`. A directory with an `index.html` is a project and is left as it is: Emacs opens the first Emacs Lisp file that `index.html` loads (`app.el` in the template), and no file that is there is written over (remove the directory in Emacs to start over). It is the same `/home/user` that the wasmacs page itself uses, so the project is also there when you open wasmacs directly. Its files:
 
 ```text
 index.html   the page: a <div id="app">, the stylesheet, <script type="text/emacs-lisp" src="app.el">
@@ -109,6 +109,16 @@ The server can keep data in two ways:
 ```
 
 [`examples/sqlite`](examples/sqlite) is a reading list kept that way ([try it](https://modeverv.github.io/elisp-studio/?example=sqlite)). In the studio the database is a file in the memory of the server's Emacs, which the studio keeps in the browser (IndexedDB) between visits; under a native Emacs it is the file `.data/app.db`, which the `sqlite3` command line tool can open too.
+
+- `app-server-sql-select`, `app-server-sql-execute`, `app-server-sql-insert` and `app-server-sql-transaction`: the same SQL on SQLite (`app-server-database`) or on MySQL, when `app-server-mysql` names a MySQL option file (a shared host, below).
+  - **Parameters.** Each `?` is one of the parameters, never SQL text. On MySQL a string goes as hex, `CONVERT(X'...' USING utf8mb4)`.
+  - **Rows** come back as lists of strings, numbers and nil.
+  - **What MySQL needs:** a SELECT names its columns (no `*`), and an alias is written with `AS` and dropped.
+  - **Errors** are `app-server-sql-error`, with MySQL's code: 1062 is a duplicate.
+  - **A transaction** is all or nothing, also when the process ends in its middle.
+  - **Sessions and sign-in attempts** follow the same choice: with MySQL they are its tables `app_server_sessions` and `app_server_attempts`.
+
+  [`examples/todos`](examples/todos) uses them: accounts with a name and a password, and each account's own todos ([try it](https://modeverv.github.io/elisp-studio/?example=todos)). The one `server.el` runs in the studio (SQLite in the tab), under `run.sh`, and on a shared host with MySQL; only its `CREATE TABLE`s are written twice.
 
 About bundling SQLite: it is in the [public domain](https://www.sqlite.org/copyright.html), so there are no conditions on shipping it. The Emacs that runs in the browser has it linked in by wasmacs (see "Licence" there); a native Emacs has it if it was built with SQLite, which the usual packages are (`(sqlite-available-p)` tells). Nothing of SQLite is in this repository or in a downloaded project.
 
@@ -346,6 +356,53 @@ Inside, four Emacs processes run as a user who can write `.data/` and nothing el
 
 Parens, a larger application with `server.el`, was run the same way by hand.
 
+### On a shared host (CGI, MySQL)
+
+Some hosts (Sakura's rental server, for one) run programs only as CGI and end any process that stays. `tools/serve-cgi.el` (`server/serve-cgi.el` in the download) answers one request to `/api/` with an Emacs that then ends. The host's web server sends the other files.
+
+**How a request is handled**
+
+- It goes through serve-project's own handling: the same checks (another site's page 403, another host 421, CORS) and the same headers as under `run.sh`.
+- It runs on the host's Emacs, 27.2 or later.
+
+**What the application must do**
+
+- Keep nothing in Lisp variables between requests: the next one is another process. Keep data with `app-server-write` or in the database.
+- Put a change of several statements in `app-server-sql-transaction`: a process may be ended in the middle.
+
+Deployment is one command, over SSH, from the project's directory:
+
+```sh
+server/cgi/deploy.sh myhost www/todos todos-app https://example.com
+```
+
+**What it does**
+
+- `www/todos` (under the web root) gets the page's files, `app.cgi` and a `.htaccess`, which sends `/api/...` to `app.cgi`.
+- `todos-app` (outside the web root, mode 700) gets the project, `server/` compiled by the host's Emacs, and the data directory.
+
+**Data in MySQL**
+
+The password is kept in one place: `todos-app/my.cnf`, mode 600. Write that file on the host yourself, then deploy again:
+
+```sh
+ssh -t myhost sh todos-app/server/cgi/make-mycnf.sh mysql80.ACCOUNT.sakura.ne.jp
+```
+
+It asks for the user, the database and the password, which it does not show, and tests the connection. `app.cgi` gives the server the file's path (`APP_MYSQL`), so no copy of the password is in the web root, the project or the repository. Sessions and sign-in attempts are in that database too.
+
+**Tried on Sakura's rental server (2026-11-16)**
+
+- **The host:** FreeBSD 13.0, its own Emacs 27.2 (no SQLite or GnuTLS), MySQL 8.0, Python 3.8 for password hashes.
+- **The example:** `examples/todos`, used from Chrome — accounts, todos, a wrong password, signing out.
+- **Speed:** an answer takes 60–90 ms on the host, Emacs's start included. A sign-up takes 0.5 s, mostly the password hash.
+
+**Not there yet**
+
+- uploads larger than the body limit
+- scheduled work, which would need cron ([#39](https://github.com/modeverv/elisp-studio/issues/39))
+- `app-server-fetch` over `https:` with an Emacs that has no GnuTLS ([#41](https://github.com/modeverv/elisp-studio/issues/41))
+
 ### How fast is that server?
 
 It is one Emacs with one thread, working like Node.js: connections wait in the operating system, Emacs takes one request, runs the handler to its end, answers, takes the next. `server.el` and the server itself are byte-compiled when the server starts. Measured with ApacheBench on an Apple M4 Max, Emacs 31.1, 10 connections at a time (`ab -n 10000 -c 10`; with `-k` the connections are kept, as a proxy keeps them):
@@ -400,6 +457,7 @@ Deferring itself costs nothing to speak of: a handler that defers and answers at
   test/run.sh         the checks: every .el file compiles without a warning, then test/*-test.el (ERT)
   .github/workflows/test.yml    the same at every push to GitHub
   Dockerfile, docker-compose.yml, .dockerignore    docker compose up: the same in a container, with Caddy in front ("With Docker")
+  server/serve-cgi.el, server/cgi/    for a shared host that runs CGI: deploy.sh, make-mycnf.sh ("On a shared host")
   ```
 
   After `./run.sh`, Emacs serves the page and answers its requests. The Emacs that runs the page's `app.el` in the browser is downloaded by the page from the wasmacs site; after `./fetch-emacs.sh` it is served from `vendor/` by the same Emacs instead, and nothing needs the internet any more.
